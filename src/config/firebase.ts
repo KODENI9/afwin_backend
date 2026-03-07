@@ -24,10 +24,21 @@ if (!admin.apps.length) {
         throw new Error('Missing Firebase configuration: serviceAccountKey.json not found and environment variables are missing');
       }
 
-      // Robust private key parsing
-      privateKey = privateKey.replace(/\\n/g, '\n');
-      if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-        privateKey = privateKey.substring(1, privateKey.length - 1);
+      // Robust private key parsing for Production (Render/Heroku/Railway)
+      if (privateKey) {
+        // 1. Remove surrounding quotes if they exist
+        privateKey = privateKey.trim();
+        if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+          privateKey = privateKey.substring(1, privateKey.length - 1);
+        }
+        // 2. Map literal \n sequences to actual newlines
+        privateKey = privateKey.replace(/\\n/g, '\n');
+      }
+
+      console.log(`[Firebase] Initializing with ProjectID: ${projectId}, Email: ${clientEmail}`);
+      console.log(`[Firebase] Private Key length: ${privateKey?.length || 0} characters`);
+      if (privateKey && !privateKey.includes('BEGIN PRIVATE KEY')) {
+        console.warn('[Firebase] WARNING: Private Key does not contain BEGIN PRIVATE KEY header!');
       }
 
       admin.initializeApp({
