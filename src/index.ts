@@ -36,9 +36,13 @@ app.use(cors({
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+    
+    const isAllowed = allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development';
+    
+    if (isAllowed) {
       callback(null, true);
     } else {
+      console.warn(`[CORS] Request from origin ${origin} rejected. Allowed: ${JSON.stringify(allowedOrigins)}`);
       callback(new Error('Not allowed by CORS'));
     }
   },

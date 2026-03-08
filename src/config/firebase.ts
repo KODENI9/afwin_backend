@@ -24,22 +24,29 @@ if (!admin.apps.length) {
         throw new Error('Missing Firebase configuration: serviceAccountKey.json not found and environment variables are missing');
       }
 
-      // Robust private key parsing for Production (Render/Heroku/Railway)
+      // Super-Robust private key parsing for Production (Render/Vercel)
       if (privateKey) {
-        // 1. Remove surrounding quotes if they exist
+        // 1. Remove surrounding whitespace and quotes
         privateKey = privateKey.trim();
         if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
           privateKey = privateKey.substring(1, privateKey.length - 1);
         }
-        // 2. Map literal \n sequences to actual newlines
+        
+        // 2. Handle escaped newlines (e.g. \n)
         privateKey = privateKey.replace(/\\n/g, '\n');
+        
+        // 3. Fix potential "one-line" PEM where actual newlines are missing but required between headers
+        if (privateKey.includes('-----BEGIN PRIVATE KEY-----') && !privateKey.includes('\n')) {
+          privateKey = privateKey
+            .replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----\n')
+            .replace('-----END PRIVATE KEY-----', '\n-----END PRIVATE KEY-----');
+        }
       }
 
-      console.log(`[Firebase] Initializing with ProjectID: ${projectId}, Email: ${clientEmail}`);
-      console.log(`[Firebase] Private Key length: ${privateKey?.length || 0} characters`);
-      if (privateKey && !privateKey.includes('BEGIN PRIVATE KEY')) {
-        console.warn('[Firebase] WARNING: Private Key does not contain BEGIN PRIVATE KEY header!');
-      }
+      console.log(`[Firebase] Initializing for ${projectId}`);
+      console.log(`[Firebase] Key Length: ${privateKey?.length}`);
+      console.log(`[Firebase] Header present: ${privateKey?.includes('BEGIN PRIVATE KEY')}`);
+      console.log(`[Firebase] Actual newlines count: ${(privateKey?.match(/\n/g) || []).length}`);
 
       admin.initializeApp({
         credential: admin.credential.cert({

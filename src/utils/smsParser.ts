@@ -11,6 +11,7 @@ export const extractTxId = (sms: string): string | null => {
   const patterns = [
     /ID\s*[:\-\s]\s*([A-Za-z0-9]+)/i,
     /Transaction\s*ID\s*[:\-\s]\s*([A-Za-z0-9]+)/i,
+    /Txn\s*ID\s*[:\-\s]\s*([A-Za-z0-9]+)/i,
     /Ref\s*[:\-\s]\s*([A-Za-z0-9]+)/i,
     /Trans\.\s*ID\s*[:\-\s]\s*([A-Za-z0-9]+)/i
   ];
@@ -46,9 +47,39 @@ export const parseMobileMoneySMS = (sms: string) => {
   for (const pattern of amountPatterns) {
     const match = sms.match(pattern);
     if (match && match[1]) {
-      // Nettoyer le montant (enlever espaces, points, virgules)
-      const cleanAmount = match[1].replace(/[\s.,]/g, '');
-      amount = parseFloat(cleanAmount);
+      // Nettoyer le montant plus intelligemment
+      const rawAmount = match[1].trim();
+      
+      // Nouvelle logique de nettoyage
+      let clean = rawAmount.replace(/\s/g, ''); // Enlever les espaces
+      
+      // Si on a ",00" ou ".00" à la fin, on l'enlève car c'est du FCFA (pas de centimes utiles)
+      clean = clean.replace(/[,.]00$/, '');
+      
+      // Si il reste une virgule, on la traite comme un séparateur décimal si suivi de 2 chiffres, 
+      // sinon c'est un séparateur de milliers
+      if (clean.includes(',')) {
+        const parts = clean.split(',');
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.length === 2) {
+          // ex: 300,50 -> 300.5
+          amount = parseFloat(parts.slice(0, -1).join('').replace(/[^0-9]/g, '') + '.' + lastPart);
+        } else {
+          // ex: 1,000 -> 1000
+          amount = parseFloat(clean.replace(/[^0-9]/g, ''));
+        }
+      } else if (clean.includes('.')) {
+        const parts = clean.split('.');
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.length === 2) {
+          amount = parseFloat(parts.slice(0, -1).join('').replace(/[^0-9]/g, '') + '.' + lastPart);
+        } else {
+          amount = parseFloat(clean.replace(/[^0-9]/g, ''));
+        }
+      } else {
+        amount = parseFloat(clean.replace(/[^0-9]/g, ''));
+      }
+
       if (amount > 0) break;
     }
   }
