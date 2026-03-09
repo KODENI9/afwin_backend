@@ -25,6 +25,8 @@ export interface Draw {
   snapshotTotals?: Record<number, number>; // {1: 1000, 2: 500, ...}
   snapshotHash?: string; // SHA256 of snapshotTotals
   resolvedAt?: string;
+  payoutStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED';
+  totalPayoutDistributed?: number;
   locked?: boolean;
   created_at: string;
   updated_at?: string;
