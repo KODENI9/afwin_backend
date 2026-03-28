@@ -32,24 +32,16 @@ export interface Draw {
   updated_at?: string;
 }
 
-// One entry in a multi-number bet: a specific number and its stake
-export interface BetEntry {
-  number: number;   // 1-9
-  amount: number;   // positive CFA
-  payout: number;   // 0 until resolved, then amount * multiplier if won
-  status: 'pending' | 'won' | 'lost';
-}
-
 export interface Bet {
   id?: string;
   user_id: string;
   draw_id: string;
-  entries: BetEntry[];    // List of (number, amount) entries
-  totalAmount: number;   // Sum of all entry amounts, for quick balance checks
-  status: 'pending' | 'won' | 'lost' | 'partial'; // 'partial' if only some entries win
-  totalPayout: number;   // Total amount won across all entries
-  created_at: string;
-  updated_at?: string;
+  number: number;
+  amount: number;
+  status: 'PENDING' | 'WON' | 'LOST';
+  payoutAmount: number;
+  createdAt: string;
+  resolvedAt?: string;
 }
 
 export interface Transaction {

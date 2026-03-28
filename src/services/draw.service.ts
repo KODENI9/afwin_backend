@@ -32,22 +32,17 @@ export class DrawService {
       let totalPool = 0;
       betsSnapshot.docs.forEach(doc => {
         const bet = doc.data() as Bet;
+        const num = Number(bet.number);
+        const amt = Number(bet.amount);
 
-        // Support new multi-entry format (entries[])
-        const entries = Array.isArray(bet.entries) ? bet.entries : [];
-        for (const entry of entries) {
-          const num = Number(entry.number);
-          const amt = Number(entry.amount);
-
-          if (isNaN(num) || num < 1 || num > 9) {
-            console.warn(`[Draw] Skipping invalid entry number ${entry.number} for draw ${drawId}`);
-            continue;
-          }
-          if (isNaN(amt) || amt <= 0) continue;
-
-          snapshotTotals[num] = (snapshotTotals[num] || 0) + amt;
-          totalPool += amt;
+        if (isNaN(num) || num < 1 || num > 9) {
+          console.warn(`[Draw] Skipping invalid entry number ${bet.number} for draw ${drawId}`);
+          return;
         }
+        if (isNaN(amt) || amt <= 0) return;
+
+        snapshotTotals[num] = (snapshotTotals[num] || 0) + amt;
+        totalPool += amt;
       });
 
       // 2. Security Hash

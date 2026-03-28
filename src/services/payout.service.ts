@@ -53,7 +53,7 @@ export class PayoutService {
       // Fetch a chunk of PENDING bets
       const chunkSnapshot = await db.collection('bets')
         .where('draw_id', '==', drawId)
-        .where('status', '==', 'pending')
+        .where('status', '==', 'PENDING')
         .limit(this.CHUNK_SIZE)
         .get();
 
@@ -69,23 +69,13 @@ export class PayoutService {
         const userId = betData.user_id;
         const idempotencyKey = `PAYOUT_${drawId}_${betDoc.id}`;
 
-        let totalPayout = 0;
-        let hasWin = false;
-        let hasLoss = false;
+        let payoutAmount = 0;
+        let betStatus: 'WON' | 'LOST' = 'LOST';
 
-        const resolvedEntries = (betData.entries || []).map(entry => {
-          if (entry.number === winningNumber) {
-            const entryPayout = Math.floor(entry.amount * multiplier);
-            totalPayout += entryPayout;
-            hasWin = true;
-            return { ...entry, status: 'won' as const, payout: entryPayout };
-          } else {
-            hasLoss = true;
-            return { ...entry, status: 'lost' as const, payout: 0 };
-          }
-        });
-
-        const betStatus = hasWin && hasLoss ? 'partial' : hasWin ? 'won' : 'lost';
+        if (betData.number === winningNumber) {
+          payoutAmount = Math.floor(betData.amount * multiplier);
+          betStatus = 'WON';
+        }
 
         try {
           await db.runTransaction(async (t) => {
@@ -95,35 +85,37 @@ export class PayoutService {
             );
             
             if (!existingTx.empty) {
-              // Even if skipped, we verify the bet status isn't 'pending' anymore
-              // to avoid infinite loops if it was partially updated before crash
               const currentBet = await t.get(betDoc.ref);
-              if (currentBet.data()?.status === 'pending') {
-                t.update(betDoc.ref, { status: betStatus });
+              if (currentBet.data()?.status === 'PENDING') {
+                t.update(betDoc.ref, { 
+                  status: betStatus,
+                  payoutAmount,
+                  resolvedAt: new Date().toISOString()
+                });
               }
               return;
             }
 
             t.update(betDoc.ref, {
-              entries: resolvedEntries,
               status: betStatus,
-              totalPayout,
+              payoutAmount,
+              resolvedAt: new Date().toISOString(),
               updated_at: new Date().toISOString()
             });
 
-            if (totalPayout > 0) {
+            if (payoutAmount > 0) {
               const profileRef = db.collection('profiles').doc(userId);
               const profileDoc = await t.get(profileRef);
               if (!profileDoc.exists) throw new Error(`Profile not found for user ${userId}`);
 
               const currentBalance = profileDoc.data()?.balance || 0;
-              t.update(profileRef, { balance: currentBalance + totalPayout });
+              t.update(profileRef, { balance: currentBalance + payoutAmount });
 
               const transaction: Transaction = {
                 user_id: userId,
                 draw_id: drawId,
                 type: 'payout',
-                amount: totalPayout,
+                amount: payoutAmount,
                 provider: 'System',
                 reference: idempotencyKey,
                 status: 'approved',
@@ -135,14 +127,14 @@ export class PayoutService {
               const notification: Notification = {
                 user_id: userId,
                 title: '🏆 Gain AF-WIN !',
-                message: `Félicitations ! Vous avez gagné ${totalPayout} CFA sur le tirage du ${drawData.draw_date}.`,
+                message: `Félicitations ! Vous avez gagné ${payoutAmount} CFA sur le tirage du ${drawData.draw_date}.`,
                 type: 'win',
                 read: false,
                 created_at: new Date().toISOString()
               };
               t.set(db.collection('notifications').doc(), notification);
 
-              totalPaid += totalPayout;
+              totalPaid += payoutAmount;
             } else {
               // Still log a 0-amount transaction for idempotency
               t.set(db.collection('transactions').doc(), {

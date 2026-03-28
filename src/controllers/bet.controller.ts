@@ -148,28 +148,22 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
         updated_at: new Date().toISOString()
       });
 
-      // 6. Build the BetEntry objects (payout=0, status=pending until draw resolves)
-      const betEntries = entries.map(e => ({
-        number: e.number,
-        amount: e.amount,
-        payout: 0,
-        status: 'pending' as const,
-      }));
+      // 6. Create individual Bet documents for each entry
+      for (const entry of entries) {
+        const newBetRef = db.collection('bets').doc();
+        const newBet: Bet = {
+          user_id: userId,
+          draw_id,
+          number: entry.number,
+          amount: entry.amount,
+          status: 'PENDING',
+          payoutAmount: 0,
+          createdAt: new Date().toISOString(),
+        };
+        t.set(newBetRef, newBet);
+      }
 
-      // 7. Save a single Bet document with all entries
-      const newBetRef = db.collection('bets').doc();
-      const newBet: Bet = {
-        user_id: userId,
-        draw_id,
-        entries: betEntries,
-        totalAmount,
-        status: 'pending',
-        totalPayout: 0,
-        created_at: new Date().toISOString(),
-      };
-      t.set(newBetRef, newBet);
-
-      // 8. Update draw pool totals per entry number
+      // 7. Update draw pool totals per entry number
       const updatedTotalsByNumber = { ...currentTotalsByNumber };
       for (const entry of entries) {
         updatedTotalsByNumber[entry.number] = (updatedTotalsByNumber[entry.number] || 0) + entry.amount;
@@ -180,7 +174,7 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
         updated_at: new Date().toISOString()
       });
 
-      // 9. Log a single transaction for the total bet amount
+      // 8. Log a single transaction for the total bet amount
       const txRef = db.collection('transactions').doc();
       const transaction: Transaction = {
         user_id: userId,
@@ -188,7 +182,7 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
         type: 'bet',
         amount: -totalAmount,
         provider: 'System',
-        reference: `BET-${draw_id.substring(0, 8)}-${newBetRef.id.substring(0, 8)}`,
+        reference: `BET-${draw_id.substring(0, 8)}-${userId.substring(0, 8)}`,
         status: 'approved',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -203,22 +197,53 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
   }
 };
 
+export const getMyHistory = async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.auth?.userId;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+  const limit = parseInt(req.query.limit as string) || 20;
+  const lastDocId = req.query.lastDocId as string;
+
+  try {
+    let query = db.collection('bets')
+      .where('user_id', '==', userId)
+      .orderBy('createdAt', 'desc')
+      .limit(limit);
+
+    if (lastDocId) {
+      const lastDoc = await db.collection('bets').doc(lastDocId).get();
+      if (lastDoc.exists) {
+        query = query.startAfter(lastDoc);
+      }
+    }
+
+    const snapshot = await query.get();
+    const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+    
+    const nextCursor = snapshot.docs.length === limit 
+      ? snapshot.docs[snapshot.docs.length - 1]?.id 
+      : null;
+
+    res.status(200).json({ bets, nextCursor });
+  } catch (error) {
+    console.error('Error fetching bet history:', error);
+    res.status(500).json({ error: 'Failed to fetch bet history' });
+  }
+};
+
+// Deprecated: getMyBets (keeping for backward compatibility but using the new structure)
 export const getMyBets = async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.auth?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const betsRef = db.collection('bets');
-    const snapshot = await betsRef
+    const snapshot = await db.collection('bets')
       .where('user_id', '==', userId)
+      .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
       
     const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-    
-    // Manual sort by date descending
-    bets.sort((a: any, b: any) => (b.created_at || '').localeCompare(a.created_at || ''));
-    
     res.status(200).json(bets);
   } catch (error) {
     console.error('Error fetching bets:', error);

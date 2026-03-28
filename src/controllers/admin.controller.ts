@@ -62,13 +62,11 @@ export const getAllBetsForDraw = async (req: AuthenticatedRequest, res: Response
       const data = doc.data() as Bet;
       userIds.add(data.user_id);
 
-      // Multi-entry format: aggregate each entry's amount per number
-      const entries = Array.isArray(data.entries) ? data.entries : [];
-      for (const entry of entries) {
-        if (typeof entry.number === 'number' && typeof entry.amount === 'number') {
-          totals[entry.number] = (totals[entry.number] || 0) + entry.amount;
-          totalAmount += entry.amount;
-        }
+      const num = Number(data.number);
+      const amt = Number(data.amount);
+      if (!isNaN(num) && num >= 1 && num <= 9 && !isNaN(amt)) {
+        totals[num] = (totals[num] || 0) + amt;
+        totalAmount += amt;
       }
     });
 
@@ -495,9 +493,9 @@ export const getGlobalStats = async (req: AuthenticatedRequest, res: Response) =
     });
 
     betsSnap.docs.forEach(doc => {
-      const data = doc.data();
-      totalBets += data.amount;
-      if (data.status === 'won') totalGains += data.payout || data.gain || 0;
+      const data = doc.data() as Bet;
+      totalBets += Number(data.amount) || 0;
+      if (data.status === 'WON') totalGains += Number(data.payoutAmount) || 0;
     });
 
     // --- Time-based Stats (Daily - 30 days) ---
@@ -521,17 +519,18 @@ export const getGlobalStats = async (req: AuthenticatedRequest, res: Response) =
     }
 
     betsSnap.docs.forEach(doc => {
-        const data = doc.data();
-        if (!data.created_at) return;
+        const data = doc.data() as Bet;
+        const createdAt = data.createdAt || (data as any).created_at;
+        if (!createdAt) return;
         
-        const dateStr = data.created_at.split('T')[0];
+        const dateStr = createdAt.split('T')[0];
         if (last30Days[dateStr]) {
-            last30Days[dateStr].bets += data.amount;
+            last30Days[dateStr].bets += Number(data.amount) || 0;
         }
 
-        const hourStr = data.created_at.substring(0, 13);
+        const hourStr = createdAt.substring(0, 13);
         if (last24Hours[hourStr]) {
-            last24Hours[hourStr].bets += data.amount;
+            last24Hours[hourStr].bets += Number(data.amount) || 0;
         }
     });
 
