@@ -134,13 +134,19 @@ export const withdraw = async (req: AuthenticatedRequest, res: Response) => {
       // Deduct balance immediately to "block" funds (Use numAmount for safety)
       t.update(profileRef, { balance: currentBalance - numAmount });
 
+      // ── F20: Optional Withdrawal Number ─────────────────────────────
+      // Use provided number or fallback to profile phone
+      const finalWithdrawAccount = (account_details && account_details.trim()) 
+        ? account_details.trim() 
+        : (profileData?.phone || 'Not provided');
+
       // Create pending withdrawal transaction
       const transaction: Transaction = {
         user_id: userId,
         type: 'withdrawal',
         amount: numAmount,
         provider: provider || 'Mobile Money',
-        account_details: account_details || 'Not provided',
+        account_details: finalWithdrawAccount,
         status: 'pending',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
