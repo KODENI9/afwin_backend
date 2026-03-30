@@ -7,28 +7,26 @@ import { db } from '../config/firebase';
 const clerkAuth = ClerkExpressRequireAuth({});
 
 export const requireAuth = (req: Request, res: Response, next: NextFunction) => {
-  // Debug logging
   const authHeader = req.headers.authorization;
   
-  if (!process.env.CLERK_SECRET_KEY) {
-    console.error(`[Auth] CRITICAL: CLERK_SECRET_KEY is missing in process.env!`);
-    return res.status(500).json({ error: 'Backend configuration error (Secret Key missing)' });
+  // 1. Manuel check to avoid Clerk blowing up on missing header
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.warn(`[Auth] Rejected: Missing or invalid Bearer token for ${req.path}`);
+    return res.status(401).json({ error: 'Unauthenticated', message: 'Missing Authorization header' });
   }
 
-  if (!authHeader) {
-    console.warn(`[Auth] No Authorization header found for ${req.method} ${req.url}`);
-    // If we want to allow the Clerk middleware to handle the 401:
-    return (clerkAuth as any)(req, res, next);
-  }
-
-  console.log(`[Auth] Header found for ${req.method} ${req.url}: ${authHeader.substring(0, 20)}...`);
-  
-  // Wrap to catch potential errors during validation
+  // 2. Delegate to Clerk with error catch
   try {
-    return (clerkAuth as any)(req, res, next);
-  } catch (err) {
-    console.error(`[Auth] Exception in Clerk middleware:`, err);
-    return res.status(401).json({ error: 'Unauthenticated' });
+    return (clerkAuth as any)(req, res, (err: any) => {
+      if (err) {
+        console.error(`[Auth] Clerk validation failed for ${req.path}:`, err.message);
+        return res.status(401).json({ error: 'Unauthenticated', message: err.message });
+      }
+      next();
+    });
+  } catch (err: any) {
+    console.error(`[Auth] CRITICAL error in Clerk middleware for ${req.path}:`, err.message);
+    return res.status(500).json({ error: 'Internal server error during authentication' });
   }
 };
 

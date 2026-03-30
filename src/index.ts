@@ -13,14 +13,18 @@ import adminRoutes from './routes/admin.routes';
 import profileRoutes from './routes/profile.routes';
 import notificationRoutes from './routes/notification.routes';
 import { maintenanceMiddleware } from './middleware/maintenance';
-import { startDrawScheduler, ensureTodayDraw } from './jobs/drawScheduler';
+import { startDrawScheduler } from './jobs/drawScheduler';
 
 // No changes needed here, just removing the old call
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-console.log(`[Config] CLERK_SECRET_KEY present: ${!!process.env.CLERK_SECRET_KEY}`);
+// LOGGING D'URGENCE : Voir toutes les requêtes entrantes
+app.use((req, res, next) => {
+  console.log(`[HTTP] ${new Date().toISOString()} ${req.method} ${req.url}`);
+  next();
+});
 
 // ── Security Headers ──────────────────────────────────────────────────────
 app.use(helmet());
@@ -84,6 +88,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
+app.get('/api/ping', (req, res) => {
+  res.json({ status: 'ok', message: 'Hello from AFWIN API' });
+});
+
 // ── Maintenance mode (applies to protected API routes only) ───────────────
 app.use('/api/bets', maintenanceMiddleware);
 app.use('/api/wallet', maintenanceMiddleware);
@@ -96,16 +104,19 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/profiles', profileRoutes);
 app.use('/api/notifications', notificationRoutes);
 
-// ── Start server ──────────────────────────────────────────────────────────
-app.listen(port, async () => {
-  console.log(`Server is running on port ${port}`);
+// ── Global Error Handler (CATCH-ALL) ──────────────────────────────────────
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error(`[ERROR] ${new Date().toISOString()} ${req.method} ${req.url}:`, err.stack || err.message || err);
+  res.status(err.status || 500).json({
+    error: 'Internal Server Error',
+    message: err.message || 'An unexpected error occurred',
+    path: req.url
+  });
+});
 
-  // Ensure today's draw exists on startup
-  try {
-    await ensureTodayDraw();
-  } catch (err) {
-    console.error('[Startup] Error ensuring today\'s draw exists:', err);
-  }
+// ── Start server ──────────────────────────────────────────────────────────
+app.listen(port as number, '0.0.0.0', async () => {
+  console.log(`Server is running on port ${port}`);
 
   // Start scheduled jobs
   startDrawScheduler();

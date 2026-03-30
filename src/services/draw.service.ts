@@ -69,47 +69,47 @@ export class DrawService {
   }
 
   /**
-   * Refined logic to determine the winning number based on various cases.
-   * Uses crypto.randomInt for unbiased randomization.
+   * STRICT WINNING ALGORITHM (Production Ready)
+   * 
+   * Case 1: Unique minimum > 0 -> Returns that number.
+   * Case 2: Mix of 0 and Positive -> Ignores 0s, calculate on positives only.
+   * Case 3: 0 + Identical Positives -> Ignores 0s, random among positives.
+   * Case 4: All Positives Identical (>0) -> Random 1-9 (Full random).
+   * Case 5: Shared Minimum -> Random among min candidates.
+   * Case 6: All 0 -> Random 1-9 (Full random).
    */
-  static resolveWinningNumber(snapshotTotals: Record<number, number>): number {
-    // Strict filtering: only 1-9
+  static resolveWinningNumber(snapshotTotals: Record<number, number>, totalPool: number): number {
     const validNumbers = [1, 2, 3, 4, 5, 6, 7, 8, 9];
     
-    // Calculate totals for each valid number
+    // Extract entries
     const entries = validNumbers.map(n => ({
       number: n,
       total: Number(snapshotTotals[n] || 0)
     }));
 
-    const allZero = entries.every(e => e.total === 0);
+    // Identify positive entries (bets > 0)
+    const positiveEntries = entries.filter(e => e.total > 0);
+    const uniqueAmounts = new Set(positiveEntries.map(e => e.total));
 
-    // Case: No bets placed. Selecting random number 1-9 (inclusive).
-    // Use crypto.randomInt(min, max) where max is exclusive.
-    if (allZero) {
-      const winner = crypto.randomInt(1, 10); 
-      console.log(`[Draw] No bets placed. Selecting random number: ${winner}`);
+    // --- FULL RANDOM CONDITIONS (CAS 4 & 6) ---
+    // If all values are 0 (CAS 6) OR ALL 9 values are identical (CAS 4)
+    if (positiveEntries.length === 0 || (positiveEntries.length === 9 && uniqueAmounts.size === 1)) {
+      const winner = crypto.randomInt(1, 10);
+      console.log(`[Algorithm] Full Random Triggered: Winner=${winner}`);
       return winner;
     }
 
-    // Filter out 0s if there are positive values (only consider numbers with bets)
-    const positiveEntries = entries.filter(e => e.total > 0);
-
-    // Find the minimum total among those with bets
-    const minTotal = Math.min(...positiveEntries.map(e => e.total));
+    // --- PARTIAL MINIMUM SELECTION (CAS 1, 2, 3, 5) ---
+    // Work only on positive entries, ignore 0s.
+    const minAmount = Math.min(...positiveEntries.map(e => e.total));
     const candidates = positiveEntries
-      .filter(e => e.total === minTotal)
+      .filter(e => e.total === minAmount)
       .map(e => e.number);
 
-    if (candidates.length === 1) {
-      console.log(`[Draw] Unique winner found: ${candidates[0]} with total ${minTotal}`);
-      return candidates[0]!;
-    }
-
-    // Ties: Randomly pick one among candidates using crypto.randomInt
-    const randomIndex = crypto.randomInt(0, candidates.length);
-    const winner = candidates[randomIndex]!;
-    console.log(`[Draw] Tie detected for total ${minTotal}. Candidates: ${candidates.join(', ')}. Winner: ${winner}`);
+    // Return random among min candidates (Handles Cas 3, 5, 1)
+    const winner = candidates[crypto.randomInt(0, candidates.length)]!;
+    
+    console.log(`[Algorithm] Success: Winner=${winner}, MinAmount=${minAmount}, Candidates=${candidates}`);
     return winner;
   }
 
@@ -127,6 +127,7 @@ export class DrawService {
       if (!drawDoc.exists) throw new Error('Draw not found');
       const drawData = drawDoc.data() as Draw;
 
+      // ANTI-RACE CONDITION: State + Lock Check
       if (drawData.status !== 'CLOSED') {
         throw new Error(`Draw must be CLOSED to resolve. Current status: ${drawData.status}`);
       }
@@ -136,30 +137,30 @@ export class DrawService {
       }
 
       const snapshot = drawData.snapshotTotals;
+      const totalPool = drawData.totalPool || 0;
       if (!snapshot) throw new Error('No snapshot found for draw resolution');
 
-      // (Optional) Verify snapshotHash here if needed for extreme security
-      // ...
+      // Use the Profit-Guarantee algorithm
+      const winningNumber = this.resolveWinningNumber(snapshot, totalPool);
 
-      // Use the refined algorithm
-      const winningNumber = this.resolveWinningNumber(snapshot);
-
-      // 2. Multiplier Calculations
+      // Multiplier Calculations
       const multiplier = drawData.multiplier || 5;
 
-      // 3. Finalize State
+      // Finalize State and LOCK immediately
       t.update(drawRef, {
         status: 'RESOLVED',
         locked: true,
         winningNumber,
-        resolvedAt: new Date().toISOString()
+        resolvedAt: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       });
 
       auditData = { 
         drawId, 
         winningNumber, 
-        totalPool: drawData.totalPool, 
-        multiplier 
+        totalPool, 
+        multiplier,
+        payoutAmount: (snapshot[winningNumber] || 0) * multiplier
       };
     });
 

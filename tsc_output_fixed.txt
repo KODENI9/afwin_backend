@@ -1,0 +1,2 @@
+﻿src/index.ts(16,30): error TS2305: Module '"./jobs/drawScheduler"' has no exported member 'ensureTodayDraw'.
+src/utils/simulate_draws.ts(9,32): error TS2554: Expected 2 arguments, but got 1.

@@ -7,6 +7,7 @@ export interface UserProfile {
   referral_code: string;
   referred_by?: string;
   phone?: string;
+  email?: string;
   pin_code?: string;
   first_deposit_approved?: boolean;
   is_blocked?: boolean;
@@ -16,7 +17,10 @@ export interface UserProfile {
 
 export interface Draw {
   id?: string;
-  draw_date: string; // YYYY-MM-DD
+  draw_date: string; // YYYY-MM-DD (legacy/grouping)
+  slotId: string; // S1, S2, etc.
+  startTime: string; // ISO string
+  endTime: string; // ISO string
   status: 'OPEN' | 'CLOSED' | 'RESOLVED';
   totalPool: number;
   multiplier: number; // e.g. 5
@@ -26,6 +30,9 @@ export interface Draw {
   snapshotHash?: string; // SHA256 of snapshotTotals
   resolvedAt?: string;
   payoutStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED';
+  totalPayout?: number;
+  commission?: number;
+  profit?: number;
   totalPayoutDistributed?: number;
   locked?: boolean;
   created_at: string;
@@ -48,7 +55,7 @@ export interface Transaction {
   id?: string;
   user_id: string;
   draw_id?: string; // Associated draw for payouts/bets
-  type: 'deposit' | 'withdrawal' | 'bet' | 'payout' | 'commission' | 'referral_bonus';
+  type: 'deposit' | 'withdrawal' | 'bet' | 'payout' | 'commission' | 'referral_bonus' | 'transfer_sent' | 'transfer_received';
   amount: number;
   provider: string;
   reference?: string;

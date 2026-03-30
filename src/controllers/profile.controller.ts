@@ -23,8 +23,21 @@ export const updateMyProfile = async (req: AuthenticatedRequest, res: Response) 
   const userId = req.auth?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { display_name, phone, pin_code } = req.body;
+  const { display_name, phone, pin_code, pseudo } = req.body;
   const updates: any = { updated_at: new Date().toISOString() };
+
+  if (pseudo && typeof pseudo === 'string') {
+    const cleanPseudo = pseudo.toLowerCase().trim();
+    if (cleanPseudo.length < 3) return res.status(400).json({ error: 'Le pseudo doit contenir au moins 3 caractères' });
+    if (!/^[a-z0-9_]+$/.test(cleanPseudo)) return res.status(400).json({ error: 'Le pseudo ne peut contenir que des lettres, chiffres et underscores' });
+
+    // Check uniqueness
+    const existing = await db.collection('profiles').where('pseudo', '==', cleanPseudo).limit(1).get();
+    if (!existing.empty && existing.docs[0]?.id !== userId) {
+      return res.status(400).json({ error: 'Ce pseudo est déjà utilisé par un autre membre' });
+    }
+    updates.pseudo = cleanPseudo;
+  }
 
   if (display_name && typeof display_name === 'string') {
     updates.display_name = display_name.trim().slice(0, 40);
@@ -162,26 +175,42 @@ export const getReferralStats = async (req: AuthenticatedRequest, res: Response)
     const referralsCount = referralsSnapshot.size;
 
     // Get total bonus earned from referral transactions
-    const bonusSnapshot = await db.collection('transactions')
-      .where('user_id', '==', userId)
-      .where('type', '==', 'referral_bonus')
-      .get();
-    
-    let totalBonus = 0;
-    bonusSnapshot.docs.forEach(doc => {
-      totalBonus += doc.data().amount;
-    });
+    try {
+      const bonusSnapshot = await db.collection('transactions')
+        .where('user_id', '==', userId)
+        .where('type', '==', 'referral_bonus')
+        .get();
+      
+      let totalBonus = 0;
+      bonusSnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        totalBonus += Number(data.amount) || 0;
+      });
 
-    res.status(200).json({
-      referral_code: referralCode,
-      referrals_count: referralsCount,
-      total_bonus: totalBonus,
-      referrals: referralsSnapshot.docs.map(doc => ({
-        display_name: doc.data().display_name,
-        created_at: doc.data().created_at
-      }))
-    });
+      res.status(200).json({
+        referral_code: referralCode,
+        referrals_count: referralsCount,
+        total_bonus: totalBonus,
+        referrals: referralsSnapshot.docs.map(doc => ({
+          display_name: doc.data().display_name,
+          created_at: doc.data().created_at
+        }))
+      });
+    } catch (txError) {
+      console.error('[Referral] Error fetching bonus transactions:', txError);
+      // Fallback to 0 bonus instead of failing the whole profile request
+      res.status(200).json({
+        referral_code: referralCode,
+        referrals_count: referralsCount,
+        total_bonus: 0,
+        referrals: referralsSnapshot.docs.map(doc => ({
+          display_name: doc.data().display_name,
+          created_at: doc.data().created_at
+        }))
+      });
+    }
   } catch (error: any) {
+    console.error('Fatal error in getReferralStats:', error);
     res.status(500).json({ error: error.message });
   }
 };

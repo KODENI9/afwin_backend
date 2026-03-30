@@ -5,7 +5,7 @@ import { Bet, Transaction, Draw } from '../types';
 import { BetSchema } from '../types/schemas';
 
 // Helper to get or create a profile lazily (Supports Transactions)
-export const getProfile = async (userId: string, displayName?: string, referredByCode?: string, t?: FirebaseFirestore.Transaction) => {
+export const getProfile = async (userId: string, displayName?: string, referredByCode?: string, t?: FirebaseFirestore.Transaction, email?: string) => {
   const profileRef = db.collection('profiles').doc(userId);
   const doc = t ? await t.get(profileRef) : await profileRef.get();
   
@@ -32,6 +32,7 @@ export const getProfile = async (userId: string, displayName?: string, referredB
       referral_code: referralCode,
       referred_by: parrainId,
       phone: '',
+      email: email || '',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -47,6 +48,12 @@ export const getProfile = async (userId: string, displayName?: string, referredB
   const existingData = doc.data();
   let updatedExisting = false;
   const updates: any = {};
+
+  // Sync email if missing or changed
+  if (email && existingData?.email !== email) {
+    updates.email = email;
+    updatedExisting = true;
+  }
 
   // Migration: If existing profile lacks a referral code, generate one now
   if (!existingData?.referral_code) {
@@ -88,109 +95,129 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
     return res.status(400).json({ error: result.error.issues[0]!.message });
   }
 
-  const { draw_id, entries } = result.data;
-  // Total amount = sum of all entry amounts
-  const totalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
+  const { draw_id, entries, request_id } = result.data;
+  const newTotalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
 
   try {
     await db.runTransaction(async (t) => {
-      // 1. Check if user already bet in this draw (1 bet-doc per draw)
-      const existingBet = await t.get(
-        db.collection('bets')
-          .where('user_id', '==', userId)
-          .where('draw_id', '==', draw_id)
-          .limit(1)
-      );
-
-      if (!existingBet.empty) {
-        throw new Error("Vous avez déjà parié pour ce tirage.");
+      // 1. IDEMPOTENCY CHECK (Safety First)
+      const idRef = db.collection('idempotency_keys').doc(request_id);
+      const idDoc = await t.get(idRef);
+      if (idDoc.exists) {
+        throw new Error('Cette requête a déjà été traitée. Double-clic détecté.');
       }
 
-      // 2. Check draw status inside transaction
+      // 2. TRANSACTIONAL READS (Draw, Profile, Existing Bets)
       const drawRef = db.collection('draws').doc(draw_id);
-      const drawDoc = await t.get(drawRef);
+      const profileRef = db.collection('profiles').doc(userId);
+      const existingBetsQuery = db.collection('bets')
+        .where('user_id', '==', userId)
+        .where('draw_id', '==', draw_id);
+
+      const [drawDoc, profileDoc, existingBetsSnapshot] = await Promise.all([
+        t.get(drawRef),
+        t.get(profileRef),
+        t.get(existingBetsQuery)
+      ]);
+
+      // 3. STATS & DATA VALIDATION
       if (!drawDoc.exists) throw new Error('Tirage non trouvé');
-
       const drawData = drawDoc.data() as Draw;
-      if (drawData.status !== 'OPEN') throw new Error('Les mises sont fermées.');
+      
+      // DOUBLE PROTECTION: Status + Time
+      const now = new Date().getTime();
+      const endTime = new Date(drawData.endTime).getTime();
+      
+      if (drawData.status !== 'OPEN') throw new Error('Les mises sont fermées pour ce tirage.');
+      if (now >= endTime) {
+        console.warn(`[BetRejection] User ${userId} attempted late bet for ${draw_id}. ServerNow: ${new Date(now).toISOString()}, EndTime: ${drawData.endTime}`);
+        throw new Error('Le délai de mise pour ce tirage est expiré.');
+      }
 
-      // 3. Economic protection: max 45% of pool on a single number (only if pool > 5000)
-      const MAX_PERCENT = 0.45;
-      const currentTotalsByNumber = (drawData as any).totalsByNumber || {};
-      const currentPool = drawData.totalPool || 0;
+      if (!profileDoc.exists) throw new Error('Profil utilisateur introuvable');
+      const profileData = profileDoc.data();
+      const currentBalance = profileData?.balance || 0;
 
-      if (currentPool > 5000) {
-        for (const entry of entries) {
-          const currentForNumber = currentTotalsByNumber[entry.number] || 0;
-          if ((currentForNumber + entry.amount) / (currentPool + totalAmount) > MAX_PERCENT) {
-            throw new Error(
-              `Le chiffre ${entry.number} a atteint sa limite de mises. Choisissez un autre chiffre.`
-            );
-          }
+      const existingBets = existingBetsSnapshot.docs.map(d => d.data() as Bet);
+      const existingTotalAmount = existingBets.reduce((sum, b) => sum + b.amount, 0);
+      const existingNumbers = new Set(existingBets.map(b => b.number));
+
+      // 4. BUSINESS LOGIC CHECKS
+      if (currentBalance < newTotalAmount) {
+        throw new Error(`Solde insuffisant. Requis: ${newTotalAmount} CFA, Disponible: ${currentBalance} CFA.`);
+      }
+
+      const MAX_TOTAL_PER_DRAW = 50000;
+      if (existingTotalAmount + newTotalAmount > MAX_TOTAL_PER_DRAW) {
+        throw new Error(
+          `Limite de mise par tirage atteinte (${MAX_TOTAL_PER_DRAW} CFA). Déjà misé: ${existingTotalAmount} CFA.`
+        );
+      }
+
+      for (const entry of entries) {
+        if (existingNumbers.has(entry.number)) {
+          throw new Error(`Chiffre ${entry.number} déjà misé pour ce tirage.`);
         }
       }
 
-      // 4. Check profile & balance (Critical: Use transaction t)
-      const profile = await getProfile(
-        userId,
-        req.auth?.claims?.name as string || req.auth?.claims?.fullName as string,
-        undefined,
-        t
-      );
-      const balance = profile?.balance || 0;
-      const profileRef = db.collection('profiles').doc(userId);
+      // 5. ATOMIC WRITES (Starting here, no more reads!)
+      const FieldValue = require('firebase-admin').firestore.FieldValue;
 
-      if (balance < totalAmount) throw new Error('Solde insuffisant');
-
-      // 5. Deduct total amount from balance
+      // Deduct balance uniquely
       t.update(profileRef, {
-        balance: balance - totalAmount,
+        balance: FieldValue.increment(-newTotalAmount),
         updated_at: new Date().toISOString()
       });
 
-      // 6. Create individual Bet documents for each entry
+      // Update draw totals (Atomic increment for nested fields too)
+      const drawUpdates: any = {
+        totalPool: FieldValue.increment(newTotalAmount),
+        updated_at: new Date().toISOString()
+      };
+      
       for (const entry of entries) {
-        const newBetRef = db.collection('bets').doc();
-        const newBet: Bet = {
+        drawUpdates[`totalsByNumber.${entry.number}`] = FieldValue.increment(entry.amount);
+        
+        // Create bet document
+        const betRef = db.collection('bets').doc();
+        t.set(betRef, {
           user_id: userId,
           draw_id,
           number: entry.number,
           amount: entry.amount,
           status: 'PENDING',
           payoutAmount: 0,
-          createdAt: new Date().toISOString(),
-        };
-        t.set(newBetRef, newBet);
+          createdAt: new Date().toISOString()
+        } as Bet);
       }
+      t.update(drawRef, drawUpdates);
 
-      // 7. Update draw pool totals per entry number
-      const updatedTotalsByNumber = { ...currentTotalsByNumber };
-      for (const entry of entries) {
-        updatedTotalsByNumber[entry.number] = (updatedTotalsByNumber[entry.number] || 0) + entry.amount;
-      }
-      t.update(drawRef, {
-        totalPool: currentPool + totalAmount,
-        totalsByNumber: updatedTotalsByNumber,
-        updated_at: new Date().toISOString()
-      });
-
-      // 8. Log a single transaction for the total bet amount
+      // Log transaction
       const txRef = db.collection('transactions').doc();
-      const transaction: Transaction = {
+      t.set(txRef, {
         user_id: userId,
         draw_id,
         type: 'bet',
-        amount: -totalAmount,
-        provider: 'System',
-        reference: `BET-${draw_id.substring(0, 8)}-${userId.substring(0, 8)}`,
+        amount: -newTotalAmount,
+        provider: 'AF-WIN',
+        reference: `BET-${draw_id.substring(0, 8)}-${request_id.substring(0, 6)}`,
         status: 'approved',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
-      };
-      t.set(txRef, transaction);
+      } as Transaction);
+
+      // Register request_id (idempotency key)
+      t.set(idRef, { 
+        user_id: userId, 
+        created_at: new Date().toISOString() 
+      });
     });
 
-    res.status(200).json({ success: true, message: 'Pari enregistré avec succès.' });
+    // Traceability log (Post-Transaction)
+    const { logAudit, AuditAction } = require('../services/audit.service');
+    logAudit(AuditAction.BET_PLACED, { entries, request_id }, 'USER', userId, newTotalAmount, draw_id);
+
+    res.status(200).json({ success: true, message: 'Paris enregistrés avec succès.' });
   } catch (error: any) {
     console.error('Error placing bet:', error);
     res.status(400).json({ error: error.message });
@@ -206,47 +233,76 @@ export const getMyHistory = async (req: AuthenticatedRequest, res: Response) => 
 
   try {
     let query = db.collection('bets')
-      .where('user_id', '==', userId)
-      .orderBy('createdAt', 'desc')
-      .limit(limit);
+      .where('user_id', '==', userId);
 
-    if (lastDocId) {
-      const lastDoc = await db.collection('bets').doc(lastDocId).get();
-      if (lastDoc.exists) {
-        query = query.startAfter(lastDoc);
+    // Try with ordering (Requires Index)
+    try {
+      let finalQuery = query.orderBy('createdAt', 'desc').limit(limit);
+      
+      if (lastDocId) {
+        const lastDoc = await db.collection('bets').doc(lastDocId).get();
+        if (lastDoc.exists) {
+          finalQuery = finalQuery.startAfter(lastDoc);
+        }
       }
+
+      const snapshot = await finalQuery.get();
+      const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      const nextCursor = snapshot.docs.length === limit ? snapshot.docs[snapshot.docs.length - 1]?.id : null;
+      return res.status(200).json({ bets, nextCursor });
+
+    } catch (queryError: any) {
+      console.error(`[Firestore Query Error] Error fetching grouped history with OrderBy. Check if index is missing:`, queryError.message);
+      
+      // FALLBACK: Fetch without ordering if index is missing, to avoid 500
+      const snapshot = await query.limit(limit).get();
+      const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      
+      // Tri en mémoire robuste (supporte ISO strings et Timestamps)
+      const getMs = (val: any) => {
+        if (!val) return 0;
+        if (typeof val === 'string') return new Date(val).getTime();
+        if (val.toDate) return val.toDate().getTime();
+        return new Date(val).getTime();
+      };
+      bets.sort((a, b) => getMs(b.createdAt) - getMs(a.createdAt));
+      
+      return res.status(200).json({ bets, nextCursor: null, fallbackMode: true });
     }
-
-    const snapshot = await query.get();
-    const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-    
-    const nextCursor = snapshot.docs.length === limit 
-      ? snapshot.docs[snapshot.docs.length - 1]?.id 
-      : null;
-
-    res.status(200).json({ bets, nextCursor });
-  } catch (error) {
-    console.error('Error fetching bet history:', error);
-    res.status(500).json({ error: 'Failed to fetch bet history' });
+  } catch (error: any) {
+    console.error('Fatal Error fetching bet history:', error);
+    res.status(500).json({ error: 'Failed to fetch bet history', message: error.message });
   }
 };
 
-// Deprecated: getMyBets (keeping for backward compatibility but using the new structure)
 export const getMyBets = async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.auth?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const snapshot = await db.collection('bets')
-      .where('user_id', '==', userId)
-      .orderBy('createdAt', 'desc')
-      .limit(50)
-      .get();
+    const query = db.collection('bets').where('user_id', '==', userId);
+    
+    try {
+      const snapshot = await query.orderBy('createdAt', 'desc').limit(50).get();
+      const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      return res.status(200).json(bets);
+    } catch (queryError: any) {
+      const snapshot = await query.limit(50).get();
+      const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
       
-    const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-    res.status(200).json(bets);
-  } catch (error) {
+      // Tri en mémoire robuste (supporte ISO strings et Timestamps)
+      const getMs = (val: any) => {
+        if (!val) return 0;
+        if (typeof val === 'string') return new Date(val).getTime();
+        if (val.toDate) return val.toDate().getTime();
+        return new Date(val).getTime();
+      };
+      bets.sort((a, b) => getMs(b.createdAt) - getMs(a.createdAt));
+      
+      return res.status(200).json(bets);
+    }
+  } catch (error: any) {
     console.error('Error fetching bets:', error);
-    res.status(500).json({ error: 'Failed to fetch bets' });
+    res.status(500).json({ error: 'Failed to fetch bets', message: error.message });
   }
 };

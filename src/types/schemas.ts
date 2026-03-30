@@ -12,6 +12,7 @@ export const BetEntrySchema = z.object({
 // Validates a full multi-number bet submission
 export const BetSchema = z.object({
   draw_id: z.string().nonempty("ID du tirage obligatoire"),
+  request_id: z.string().nonempty("ID de requête obligatoire"),
   entries: z
     .array(BetEntrySchema)
     .min(1, "Au moins un chiffre doit être sélectionné")

@@ -7,14 +7,30 @@ export const getMyNotifications = async (req: AuthenticatedRequest, res: Respons
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
   try {
-    const snapshot = await db.collection('notifications')
-      .where('user_id', '==', userId)
-      .orderBy('created_at', 'desc')
-      .limit(50)
-      .get();
-    
-    const notifications = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(notifications);
+    const baseQuery = db.collection('notifications').where('user_id', '==', userId);
+
+    try {
+      // Tentative avec index
+      const snapshot = await baseQuery.orderBy('created_at', 'desc').limit(50).get();
+      const notifications = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      return res.status(200).json(notifications);
+    } catch (queryError: any) {
+      console.warn(`[Firestore] getMyNotifications a échoué avec orderBy. Basculement sur le tri en mémoire.`, queryError.message);
+      
+      const snapshot = await baseQuery.limit(50).get();
+      const notifications = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      
+      // Tri en mémoire robuste (supporte ISO strings et Timestamps)
+      const getMs = (val: any) => {
+        if (!val) return 0;
+        if (typeof val === 'string') return new Date(val).getTime();
+        if (val.toDate) return val.toDate().getTime();
+        return new Date(val).getTime();
+      };
+      notifications.sort((a, b) => getMs(b.created_at) - getMs(a.created_at));
+      
+      return res.status(200).json(notifications);
+    }
   } catch (error) {
     console.error('Error fetching notifications:', error);
     res.status(500).json({ error: 'Failed to fetch notifications' });

@@ -4,9 +4,12 @@ function runSimulation(label: string, snapshot: Record<number, number>, iteratio
   console.log(`\n--- SIMULATION: ${label} ---`);
   console.log(`Snapshot: ${JSON.stringify(snapshot)}`);
   
+  let totalPool = 0;
+  Object.values(snapshot).forEach(v => totalPool += Number(v || 0));
+
   const results: Record<number, number> = {};
   for (let i = 0; i < iterations; i++) {
-    const winner = DrawService.resolveWinningNumber(snapshot);
+    const winner = DrawService.resolveWinningNumber(snapshot, totalPool);
     results[winner] = (results[winner] || 0) + 1;
   }
   

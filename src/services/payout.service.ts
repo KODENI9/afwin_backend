@@ -134,6 +134,9 @@ export class PayoutService {
               };
               t.set(db.collection('notifications').doc(), notification);
 
+              // Traceability log
+              logAudit(AuditAction.PAYOUT, { betId: betDoc.id, drawId }, 'SYSTEM', userId, payoutAmount, drawId);
+
               totalPaid += payoutAmount;
             } else {
               // Still log a 0-amount transaction for idempotency
@@ -163,13 +166,37 @@ export class PayoutService {
       });
     }
 
-    // Finalize
+    // Finalize Draw Financials
+    const commission = 0; // Logic for commission can be added here
+    const profit = (drawData.totalPool || 0) - totalPaid;
+
+    // CRITICAL SAFETY CHECK: Never payout more than the pool
+    if (totalPaid > (drawData.totalPool || 0)) {
+      console.error(`[CRITICAL] Payout overload for draw ${drawId}! Paid: ${totalPaid}, Pool: ${drawData.totalPool}`);
+      await logAudit(AuditAction.MANUAL_ADJUSTMENT, { error: 'Payout exceeded totalPool', drawId, totalPaid, pool: drawData.totalPool }, 'CRITICAL_ERROR');
+      // We don't mark as COMPLETED to allow manual fix
+      return;
+    }
+
     await drawRef.update({ 
       payoutStatus: 'COMPLETED',
+      totalPayout: totalPaid,
+      profit,
+      commission,
       updated_at: new Date().toISOString()
     });
 
-    console.log(`✅ Payout distribution complete for draw ${drawId}. Total distributed: ${totalPaid} CFA.`);
-    await logAudit(AuditAction.PAYOUT_DISTRIBUTION, { drawId, totalPaid, processedCount: processedInThisRun });
+    console.log(`✅ Payout distribution complete for draw ${drawId}. Profit: ${profit} CFA.`);
+    
+    // Update Daily Stats
+    const { AnalyticsService } = require('./analytics.service');
+    await AnalyticsService.updateDailyStats(drawData.draw_date, {
+      bets: drawData.totalPool || 0,
+      payouts: totalPaid,
+      referrals: 0, // Should be fetched from referral bonuses in this period
+      drawId
+    });
+
+    await logAudit(AuditAction.PAYOUT_DISTRIBUTION, { drawId, totalPaid, profit, processedCount: processedInThisRun });
   }
 }

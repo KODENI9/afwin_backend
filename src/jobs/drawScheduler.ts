@@ -4,112 +4,92 @@ import { Draw } from '../types';
 import { DrawService } from '../services/draw.service';
 import { PayoutService } from '../services/payout.service';
 import { logAudit, AuditAction } from '../services/audit.service';
+import { createDailyDraws } from '../utils/time.utils';
+
+/**
+ * PRODUCTION READY SCHEDULER
+ * Handles multi-slot draw management with strict idempotence.
+ */
 
 const getTodayDate = () => new Date().toISOString().substring(0, 10);
 
 /**
- * Ensures a draw document exists for today.
+ * Main Status Transition Logic (EVERY MINUTE)
+ * 1. CLOSE draws where now >= endTime
+ * 2. RESOLVE draws where status === 'CLOSED'
+ * 3. DISTRIBUTE payouts where status === 'RESOLVED'
  */
-export const ensureTodayDraw = async (): Promise<string> => {
-  const today = getTodayDate();
-  const drawsRef = db.collection('draws');
-  const existing = await drawsRef.where('draw_date', '==', today).limit(1).get();
-
-  if (!existing.empty) {
-    const doc = existing.docs[0];
-    if (doc) return doc.id;
-  }
-
-  const newDraw: Draw = {
-    draw_date: today,
-    status: 'OPEN',
-    totalPool: 0,
-    multiplier: 5, // Default multiplier
-    commissionRate: 0.10, // Default 10%
-    created_at: new Date().toISOString(),
-  };
-
-  const ref = await drawsRef.add(newDraw);
-  console.log(`[Scheduler] Created draw for ${today} — id: ${ref.id}`);
-  return ref.id;
-};
-
-/**
- * Main cycle: Close -> Resolve -> Payout
- */
-export const runDrawCycle = async (): Promise<void> => {
-  const today = getTodayDate();
-  const snapshot = await db.collection('draws')
-    .where('draw_date', '==', today)
-    .limit(1)
-    .get();
-
-  if (snapshot.empty) {
-    console.log('[Scheduler] No draw found for today.');
-    return;
-  }
-
-  const drawDoc = snapshot.docs[0];
-  if (!drawDoc) {
-    console.log('[Scheduler] Draw document is unexpectedly undefined.');
-    return;
-  }
-  const drawId = drawDoc.id;
-  const drawData = drawDoc.data() as Draw;
+export const runMultiSlotCycle = async (): Promise<void> => {
+  const now = new Date();
+  const nowIso = now.toISOString();
 
   try {
-    // 1. Close (if not already closed/resolved)
-    if (drawData.status === 'OPEN') {
-      console.log(`[Scheduler] Closing draw ${drawId}...`);
-      await DrawService.closeDraw(drawId);
+    // 1. Find draws to CLOSE (OPEN and expired)
+    const openExpired = await db.collection('draws')
+      .where('status', '==', 'OPEN')
+      .get();
+
+    for (const doc of openExpired.docs) {
+      const data = doc.data() as Draw;
+      if (nowIso >= data.endTime) {
+        console.log(`[Scheduler] Closing expired draw ${doc.id}...`);
+        await DrawService.closeDraw(doc.id).catch(err => console.error(`Failed to close ${doc.id}:`, err));
+      }
     }
 
-    // 2. Resolve (if closed)
-    const updatedDraw = await db.collection('draws').doc(drawId).get();
-    const updatedStatus = updatedDraw.data()?.status;
-    if (updatedStatus === 'CLOSED') {
-      console.log(`[Scheduler] Resolving draw ${drawId}...`);
-      await DrawService.resolveDraw(drawId);
+    // 2. Find draws to RESOLVE (CLOSED)
+    // NOTE: We do NOT use .where('locked', '!=', true) because Firestore requires a
+    // composite index for inequality filters on multiple fields, and the query silently
+    // returns 0 results when the `locked` field is missing on a document.
+    // The lock check is already enforced inside DrawService.resolveDraw().
+    const closed = await db.collection('draws')
+      .where('status', '==', 'CLOSED')
+      .get();
+
+    for (const doc of closed.docs) {
+      if (doc.data().locked === true) {
+        console.log(`[Scheduler] Draw ${doc.id} already locked, skipping.`);
+        continue;
+      }
+      console.log(`[Scheduler] Resolving draw ${doc.id}...`);
+      await DrawService.resolveDraw(doc.id).catch(err => console.error(`Failed to resolve ${doc.id}:`, err));
     }
 
-    // 3. Payout (if resolved)
-    const resolvedDraw = await db.collection('draws').doc(drawId).get();
-    if (resolvedDraw.data()?.status === 'RESOLVED') {
-      console.log(`[Scheduler] Distributing payouts for draw ${drawId}...`);
-      await PayoutService.distributePayouts(drawId);
+    // 3. Find draws to PAYOUT (RESOLVED and payoutStatus PENDING)
+    const resolved = await db.collection('draws')
+      .where('status', '==', 'RESOLVED')
+      .where('payoutStatus', '==', 'PENDING')
+      .get();
+
+    for (const doc of resolved.docs) {
+      console.log(`[Scheduler] Distributing payouts for draw ${doc.id}...`);
+      await PayoutService.distributePayouts(doc.id).catch(err => console.error(`Failed to payout ${doc.id}:`, err));
     }
+
   } catch (err) {
-    console.error(`[Scheduler] Error in draw cycle for ${drawId}:`, err);
-    await logAudit(AuditAction.MANUAL_ADJUSTMENT, { error: (err as Error).message, drawId }, 'SYSTEM_ERROR');
+    console.error(`[Scheduler] Fatal error in cycle:`, err);
   }
 };
 
 export const startDrawScheduler = (): void => {
-  // 00:00 every day → ensure draw exists for today
+  // --- JOB A: MASS CREATION at 00:00 ---
   cron.schedule('0 0 * * *', async () => {
-    console.log('[Scheduler] 00:00 — Ensuring today\'s draw exists...');
+    console.log('[Scheduler] 00:00 — Generating daily time slots...');
     try {
-      await ensureTodayDraw();
+      await createDailyDraws(getTodayDate());
     } catch (err) {
-      console.error('[Scheduler] Error creating draw:', err);
+      console.error('[Scheduler] Error in multi-slot creation:', err);
     }
-  }, { timezone: 'Africa/Abidjan' });
+  }, { timezone: 'Africa/Lome' });
 
-  // 17:45 every day → CLOSE the draw (no more bets)
-  cron.schedule('45 17 * * *', async () => {
-    console.log('[Scheduler] 17:45 — Closing today\'s draw...');
-    const today = getTodayDate();
-    const snapshot = await db.collection('draws').where('draw_date', '==', today).limit(1).get();
-    if (!snapshot.empty && snapshot.docs[0]) {
-      await DrawService.closeDraw(snapshot.docs[0].id);
-    }
-  }, { timezone: 'Africa/Abidjan' });
+  // --- JOB B: PER-MINUTE AUTOMATION ---
+  cron.schedule('* * * * *', async () => {
+    console.log('[Scheduler] Checking for draw transitions...');
+    await runMultiSlotCycle();
+  }, { timezone: 'Africa/Lome' });
 
-  // 18:00 every day → RESOLVE and PAYOUT
-  cron.schedule('0 18 * * *', async () => {
-    console.log('[Scheduler] 18:00 — Resolving and paying out today\'s draw...');
-    await runDrawCycle();
-  }, { timezone: 'Africa/Abidjan' });
+  // BOOTSTRAP: Ensure draws exist for today when server starts
+  createDailyDraws(getTodayDate()).catch(err => console.error('[Scheduler] Bootstrap failed:', err));
 
-  console.log('[Scheduler] Parimutuel Scheduler started (00:00 init, 17:45 close, 18:00 resolve)');
+  console.log('[Scheduler] Multi-Slot Automation Started (Lome Timezone)');
 };

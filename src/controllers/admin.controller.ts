@@ -6,6 +6,10 @@ import { extractTxId } from '../utils/smsParser';
 
 import { DrawService } from '../services/draw.service';
 import { PayoutService } from '../services/payout.service';
+import { logAudit, AuditAction } from '../services/audit.service';
+import { AnalyticsService } from '../services/analytics.service';
+import { SmartDetectionService } from '../services/smartDetection.service';
+import { ProfitEngineService } from '../services/profitEngine.service';
 
 export const resolveDraw = async (req: AuthenticatedRequest, res: Response) => {
   const { draw_id } = req.body;
@@ -15,11 +19,11 @@ export const resolveDraw = async (req: AuthenticatedRequest, res: Response) => {
   }
 
   try {
-    const userId = req.auth?.userId;
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const adminId = req.auth?.userId;
+    if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
 
     // Ensure the person is an admin (redundant with middleware but safe)
-    const profileRef = db.collection('profiles').doc(userId);
+    const profileRef = db.collection('profiles').doc(adminId);
     const profileDoc = await profileRef.get();
     if (!profileDoc.exists || profileDoc.data()?.role !== 'admin') {
       return res.status(403).json({ error: 'Admin only access' });
@@ -37,6 +41,9 @@ export const resolveDraw = async (req: AuthenticatedRequest, res: Response) => {
 
     // 3. Payout
     await PayoutService.distributePayouts(draw_id);
+
+    // 4. Audit Log
+    await logAudit(AuditAction.DRAW_RESOLVED, { draw_id }, adminId, undefined, 0, draw_id);
 
     res.status(200).json({ success: true, message: 'Draw resolved and payouts distributed.' });
   } catch (error: any) {
@@ -125,10 +132,19 @@ export const getPendingTransactions = async (req: AuthenticatedRequest, res: Res
       };
     }));
     
-    // Sort in memory
-    transactions.sort((a: any, b: any) => {
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime(); // Newest first
-    });
+    // Sort in memory robustly
+    const getMs = (val: any) => {
+      if (!val) return 0;
+      if (typeof val === 'string') {
+        const d = new Date(val);
+        return isNaN(d.getTime()) ? 0 : d.getTime();
+      }
+      if (val && typeof val.toDate === 'function') return val.toDate().getTime();
+      const d = new Date(val);
+      return isNaN(d.getTime()) ? 0 : d.getTime();
+    };
+
+    transactions.sort((a: any, b: any) => getMs(b.created_at || b.createdAt) - getMs(a.created_at || a.createdAt));
 
     res.status(200).json(transactions);
   } catch (error) {
@@ -267,6 +283,16 @@ export const reviewTransaction = async (req: AuthenticatedRequest, res: Response
         // For withdrawals, balance was already deducted, so we just mark as approved
         t.update(transRef, { status: "approved", updated_at: new Date().toISOString() });
 
+        // Audit Log for Approval
+        logAudit(
+          transData.type === 'deposit' ? AuditAction.DEPOSIT : AuditAction.WITHDRAW,
+          { transaction_id, status: 'approved', provider: transData.provider },
+          adminId,
+          transData.user_id,
+          transData.amount,
+          transData.draw_id
+        );
+
         // Notify user of approval
         const notifRef = db.collection("notifications").doc();
         const notification: Notification = {
@@ -386,6 +412,7 @@ export const getSettings = async (req: AuthenticatedRequest, res: Response) => {
         multiplier: 5,
         min_bet: 100,
         max_bet: 50000,
+        max_transfer_amount: 50000,
         updated_at: new Date().toISOString()
       };
       await settingsRef.set(defaultSettings);
@@ -394,18 +421,20 @@ export const getSettings = async (req: AuthenticatedRequest, res: Response) => {
     
     res.status(200).json(doc.data());
   } catch (error: any) {
+    console.error(`[AdminController] Error in getSettings:`, error.message);
     res.status(500).json({ error: error.message });
   }
 };
 
 export const updateSettings = async (req: AuthenticatedRequest, res: Response) => {
-  const { multiplier, min_bet, max_bet } = req.body;
+  const { multiplier, min_bet, max_bet, max_transfer_amount } = req.body;
   try {
     const settingsRef = db.collection('settings').doc('game_config');
     const updateData = {
       multiplier: Number(multiplier),
       min_bet: Number(min_bet),
       max_bet: Number(max_bet),
+      max_transfer_amount: Number(max_transfer_amount || 50000),
       updated_at: new Date().toISOString()
     };
     await settingsRef.set(updateData, { merge: true });
@@ -440,26 +469,57 @@ export const toggleUserBlock = async (req: AuthenticatedRequest, res: Response) 
 
 export const updateUserBalance = async (req: AuthenticatedRequest, res: Response) => {
   const { user_id, new_balance, reason } = req.body;
+
+  if (!reason || reason.trim().length < 4) {
+    return res.status(400).json({ error: 'Un motif valide (min 4 caractères) est obligatoire pour tout ajustement manuel.' });
+  }
+
   try {
+    const adminId = req.auth?.userId;
+    if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
+
     await db.runTransaction(async (t) => {
       const profileRef = db.collection('profiles').doc(user_id);
       const profileDoc = await t.get(profileRef);
-      if (!profileDoc.exists) throw new Error('User not found');
+      if (!profileDoc.exists) throw new Error('Utilisateur introuvable');
+
+      const oldBalance = profileDoc.data()?.balance || 0;
+      const numNewBalance = Number(new_balance);
 
       t.update(profileRef, { 
-        balance: Number(new_balance),
+        balance: numNewBalance,
         updated_at: new Date().toISOString()
       });
 
-      const adminId = req.auth?.userId;
+      // Internal Admin Log
       const logRef = db.collection('admin_logs').doc();
       t.set(logRef, {
         action: 'UPDATE_BALANCE',
         admin_id: adminId,
         target_user_id: user_id,
-        old_balance: profileDoc.data()?.balance,
-        new_balance: Number(new_balance),
-        reason: reason || 'Manual adjustment',
+        old_balance: oldBalance,
+        new_balance: numNewBalance,
+        reason: reason.trim(),
+        created_at: new Date().toISOString()
+      });
+
+      // Unified Audit Log
+      logAudit(
+        AuditAction.MANUAL_ADJUSTMENT,
+        { reason: reason.trim(), old_balance: oldBalance, new_balance: numNewBalance },
+        adminId,
+        user_id,
+        Math.abs(numNewBalance - oldBalance)
+      );
+
+      // Notify User
+      const notifRef = db.collection('notifications').doc();
+      t.set(notifRef, {
+        user_id: user_id,
+        title: 'Mise à jour de votre solde 💰',
+        message: `Votre solde a été ajusté à ${numNewBalance.toLocaleString()} CFA par l'administration. Motif: ${reason}`,
+        type: 'info',
+        read: false,
         created_at: new Date().toISOString()
       });
     });
@@ -469,107 +529,126 @@ export const updateUserBalance = async (req: AuthenticatedRequest, res: Response
   }
 };
 
+export const getUserTransactions = async (req: AuthenticatedRequest, res: Response) => {
+  const { user_id } = req.params;
+  try {
+    // Note: If this fails, it might need an index. Fallback to in-memory sort if needed.
+    const snapshot = await db.collection('transactions')
+      .where('user_id', '==', user_id)
+      .limit(100)
+      .get();
+    
+    const transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+    
+    // Manual sort to avoid index requirements
+    const getMs = (val: any) => {
+      if (!val) return 0;
+      if (typeof val === 'string') return new Date(val).getTime();
+      if (val.toDate) return val.toDate().getTime();
+      return new Date(val).getTime();
+    };
+    transactions.sort((a, b) => getMs(b.created_at || b.createdAt) - getMs(a.created_at || a.createdAt));
+
+    res.status(200).json(transactions);
+  } catch (error: any) {
+    console.error('getUserTransactions error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const sendAdminNotification = async (req: AuthenticatedRequest, res: Response) => {
+  const { user_id, title, message, type, target } = req.body; // target: 'user' | 'all'
+  
+  if (!title || !message) return res.status(400).json({ error: 'Titre et message obligatoires' });
+
+  try {
+    const now = new Date().toISOString();
+    const notificationBase = { 
+      title, 
+      message, 
+      type: type || 'info', 
+      read: false, 
+      created_at: now 
+    };
+
+    if (target === 'all') {
+      const usersSnapshot = await db.collection('profiles').get();
+      const batch = db.batch();
+      
+      usersSnapshot.docs.forEach(userDoc => {
+        const notifRef = db.collection('notifications').doc();
+        batch.set(notifRef, { ...notificationBase, user_id: userDoc.id });
+      });
+      
+      await batch.commit();
+      return res.status(200).json({ success: true, message: `Notification envoyée à ${usersSnapshot.size} utilisateurs.` });
+    } else {
+      if (!user_id) return res.status(400).json({ error: 'ID utilisateur requis' });
+      await db.collection('notifications').add({ ...notificationBase, user_id });
+      return res.status(200).json({ success: true, message: 'Notification envoyée.' });
+    }
+  } catch (error: any) {
+    console.error('sendAdminNotification error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getDailyStats = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const data = await AnalyticsService.getDailyHistory(30);
+    res.status(200).json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getSmartPlayers = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const data = await SmartDetectionService.getSmartPlayers(20);
+    res.status(200).json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getProfitSimulations = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const data = await ProfitEngineService.simulateProfitLevels(30);
+    res.status(200).json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getAuditLogs = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snapshot = await db.collection('audit_logs')
+      .orderBy('timestamp', 'desc')
+      .limit(50)
+      .get();
+    
+    const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.status(200).json(logs);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 export const getGlobalStats = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const snapshots = await Promise.all([
-      db.collection('transactions').where('status', '==', 'approved').get(),
-      db.collection('bets').get(),
-      db.collection('profiles').get()
-    ]);
+    const kpis = await AnalyticsService.getGlobalKPIs();
+    
+    // We keep compatibility with the old frontend chart values
+    const snapshot = await db.collection('bets').orderBy('createdAt', 'desc').limit(100).get();
+    const bets = snapshot.docs.map(doc => doc.data() as Bet);
 
-    const [transSnap, betsSnap, profilesSnap] = snapshots;
-
-    let totalDeposits = 0;
-    let totalWithdrawals = 0;
-    let totalBets = 0;
-    let totalGains = 0;
-    let totalReferralBonuses = 0;
-
-    transSnap.docs.forEach(doc => {
-      const data = doc.data();
-      if (data.type === 'deposit') totalDeposits += data.amount;
-      if (data.type === 'withdrawal') totalWithdrawals += data.amount;
-      if (data.type === 'referral_bonus') totalReferralBonuses += data.amount;
-    });
-
-    betsSnap.docs.forEach(doc => {
-      const data = doc.data() as Bet;
-      totalBets += Number(data.amount) || 0;
-      if (data.status === 'WON') totalGains += Number(data.payoutAmount) || 0;
-    });
-
-    // --- Time-based Stats (Daily - 30 days) ---
-    const last30Days: Record<string, { bets: number, deposits: number, referrals: number }> = {};
-    const now = new Date();
-    for (let i = 0; i < 30; i++) {
-        const d = new Date();
-        d.setDate(now.getDate() - i);
-        const dateKey = d.toISOString().split('T')[0];
-        if (dateKey) {
-            last30Days[dateKey] = { bets: 0, deposits: 0, referrals: 0 };
-        }
-    }
-
-    // --- Time-based Stats (Hourly - 24 hours) ---
-    const last24Hours: Record<string, { bets: number, deposits: number }> = {};
-    for (let i = 0; i < 24; i++) {
-        const d = new Date(now.getTime() - (i * 60 * 60 * 1000));
-        const hourKey = d.toISOString().substring(0, 13); // YYYY-MM-DDTHH
-        last24Hours[hourKey] = { bets: 0, deposits: 0 };
-    }
-
-    betsSnap.docs.forEach(doc => {
-        const data = doc.data() as Bet;
-        const createdAt = data.createdAt || (data as any).created_at;
-        if (!createdAt) return;
-        
-        const dateStr = createdAt.split('T')[0];
-        if (last30Days[dateStr]) {
-            last30Days[dateStr].bets += Number(data.amount) || 0;
-        }
-
-        const hourStr = createdAt.substring(0, 13);
-        if (last24Hours[hourStr]) {
-            last24Hours[hourStr].bets += Number(data.amount) || 0;
-        }
-    });
-
-    transSnap.docs.forEach(doc => {
-        const data = doc.data();
-        if (!data.created_at) return;
-
-        const dateStr = data.created_at.split('T')[0];
-        const hourStr = data.created_at.substring(0, 13);
-
-        if (data.type === 'deposit') {
-            if (last30Days[dateStr]) last30Days[dateStr].deposits += data.amount;
-            if (last24Hours[hourStr]) last24Hours[hourStr].deposits += data.amount;
-        } else if (data.type === 'referral_bonus') {
-            if (last30Days[dateStr]) last30Days[dateStr].referrals += data.amount;
-        }
-    });
-
-    const dailyStats = Object.entries(last30Days)
-      .map(([date, values]) => ({ date, ...values }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    const hourlyStats = Object.entries(last24Hours)
-      .map(([hour, values]) => ({ hour: hour.substring(11), ...values })) // Only HH
-      .sort((a, b) => a.hour.localeCompare(b.hour));
+    // Grouping for the chart (Simplified fallback)
+    const dailyStats: any[] = []; // In a real app we fetch this from dailyHistory
 
     res.status(200).json({
-      summary: {
-        totalDeposits,
-        totalWithdrawals,
-        totalBets,
-        totalGains,
-        totalReferralBonuses,
-        systemGains: totalBets - totalGains, // What system "earned" from bets
-        netProfit: totalBets - totalGains - totalReferralBonuses, // Final profit
-        usersCount: profilesSnap.size
-      },
-      dailyStats,
-      hourlyStats
+      summary: kpis,
+      dailyStats: [], // Old charts will be replaced 
+      hourlyStats: []
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

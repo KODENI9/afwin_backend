@@ -5,36 +5,26 @@ import { Draw } from '../types';
 
 export const getCurrentDraw = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const today = new Date().toISOString().substring(0, 10);
+    const nowIso = new Date().toISOString();
     const drawsRef = db.collection('draws');
     
-    const snapshot = await drawsRef.where('draw_date', '==', today).limit(1).get();
+    // Find the OPEN draw where current time is within bounds
+    const snapshot = await drawsRef
+      .where('status', '==', 'OPEN')
+      .get();
     
-    if (snapshot.empty) {
-      // Fetch default multiplier from settings
-      const settingsRef = db.collection('settings').doc('game_config');
-      const settingsDoc = await settingsRef.get();
-      const multiplier = settingsDoc.exists ? (settingsDoc.data()?.multiplier ?? 5) : 5;
-
-      // Create it if it doesn't exist
-      const newDraw: Draw = {
-        draw_date: today,
-        totalPool: 0,
-        status: 'OPEN',
-        multiplier,
-        created_at: new Date().toISOString()
-      };
-      const docRef = await drawsRef.add(newDraw);
-      return res.status(200).json({ id: docRef.id, ...newDraw });
+    // Manual filtering for time bounds to avoid complex Firestore indexing if possible
+    const currentDraw = snapshot.docs.find(doc => {
+      const data = doc.data() as Draw;
+      return nowIso >= data.startTime && nowIso < data.endTime;
+    });
+    
+    if (!currentDraw) {
+      return res.status(200).json(null);
     }
     
-    const firstDoc = snapshot.docs[0];
-    if (firstDoc) {
-      const draw = { id: firstDoc.id, ...firstDoc.data() };
-      res.status(200).json(draw);
-    } else {
-      res.status(404).json({ error: 'Draw not found' });
-    }
+    res.status(200).json({ id: currentDraw.id, ...currentDraw.data() });
+    
   } catch (error) {
     console.error('Error fetching current draw:', error);
     res.status(500).json({ error: 'Failed to fetch current draw' });
@@ -44,18 +34,36 @@ export const getCurrentDraw = async (req: AuthenticatedRequest, res: Response) =
 export const getDrawHistory = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const drawsRef = db.collection('draws');
-    // Fetch last resolved draws
-    const snapshot = await drawsRef
-      .where('status', '==', 'RESOLVED')
-      .limit(20) 
-      .get();
+    const baseQuery = drawsRef.where('status', '==', 'RESOLVED');
+
+    try {
+      // Tentative avec index pour de meilleures performances
+      const snapshot = await baseQuery.orderBy('startTime', 'desc').limit(20).get();
+      const draws = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      return res.status(200).json(draws);
+    } catch (queryError: any) {
+      console.warn(`[Firestore] getDrawHistory a échoué avec orderBy. Basculement sur le tri en mémoire.`, queryError.message);
       
-    const draws = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-    
-    // Sort by resolved date or draw date
-    draws.sort((a: any, b: any) => (b.draw_date || '').localeCompare(a.draw_date || ''));
-    
-    res.status(200).json(draws.slice(0, 10));
+      // Repli : Récupération sans tri puis tri en mémoire (évite l'erreur 500)
+      const snapshot = await baseQuery.limit(50).get();
+      const draws = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      
+      // Tri en mémoire ultra-robuste (multi-critères)
+      const getMs = (draw: any) => {
+        const val = draw.startTime || draw.draw_date || draw.created_at;
+        if (!val) return 0;
+        if (typeof val === 'string') {
+          const t = new Date(val).getTime();
+          return isNaN(t) ? 0 : t;
+        }
+        if (val.toDate) return val.toDate().getTime();
+        return new Date(val).getTime() || 0;
+      };
+      
+      draws.sort((a, b) => getMs(b) - getMs(a));
+
+      return res.status(200).json(draws.slice(0, 20));
+    }
   } catch (error) {
     console.error('Error fetching draw history:', error);
     res.status(500).json({ error: 'Failed to fetch draw history' });
