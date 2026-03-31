@@ -40,8 +40,10 @@ export class PayoutService {
       console.log(`Starting payout processing for draw ${drawId}...`);
     }
 
-    const { winningNumber, multiplier } = drawData;
-    if (winningNumber === undefined || multiplier === undefined) {
+    const { winningNumber, realMultiplier, multiplier } = drawData;
+    const effectiveMultiplier = realMultiplier !== undefined ? realMultiplier : (multiplier || 5);
+
+    if (winningNumber === undefined) {
       throw new Error('Draw resolution data missing');
     }
 
@@ -73,7 +75,7 @@ export class PayoutService {
         let betStatus: 'WON' | 'LOST' = 'LOST';
 
         if (betData.number === winningNumber) {
-          payoutAmount = Math.floor(betData.amount * multiplier);
+          payoutAmount = Math.floor(betData.amount * effectiveMultiplier);
           betStatus = 'WON';
         }
 

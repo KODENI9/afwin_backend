@@ -35,6 +35,7 @@ export interface Draw {
   profit?: number;
   totalPayoutDistributed?: number;
   locked?: boolean;
+  realMultiplier?: number;
   created_at: string;
   updated_at?: string;
 }

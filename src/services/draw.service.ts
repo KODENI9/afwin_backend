@@ -78,39 +78,55 @@ export class DrawService {
    * Case 5: Shared Minimum -> Random among min candidates.
    * Case 6: All 0 -> Random 1-9 (Full random).
    */
-  static resolveWinningNumber(snapshotTotals: Record<number, number>, totalPool: number): number {
-    const validNumbers = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  /**
+   * ÉTAPE 1 — SÉLECTION DU GAGNANT (DÉTERMINISTE)
+   * 
+   * @param snapshotTotals Totaux des mises par chiffre 1-9
+   * @param seed La graine déterministe (doit être le snapshotHash)
+   */
+  static resolveWinningNumber(snapshotTotals: Record<number, number>, seed: string): { 
+    winner: number, 
+    zeros: number[], 
+    workingSet: number[], 
+    minTotal: number, 
+    candidates: number[],
+    hashUsed?: string | undefined
+  } {
+    const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9];
     
-    // Extract entries
-    const entries = validNumbers.map(n => ({
-      number: n,
-      total: Number(snapshotTotals[n] || 0)
-    }));
+    // 1. Séparer les valeurs
+    const zeros = numbers.filter(n => (Number(snapshotTotals[n]) || 0) === 0);
+    const positive = numbers.filter(n => (Number(snapshotTotals[n]) || 0) > 0);
 
-    // Identify positive entries (bets > 0)
-    const positiveEntries = entries.filter(e => e.total > 0);
-    const uniqueAmounts = new Set(positiveEntries.map(e => e.total));
-
-    // --- FULL RANDOM CONDITIONS (CAS 4 & 6) ---
-    // If all values are 0 (CAS 6) OR ALL 9 values are identical (CAS 4)
-    if (positiveEntries.length === 0 || (positiveEntries.length === 9 && uniqueAmounts.size === 1)) {
-      const winner = crypto.randomInt(1, 10);
-      console.log(`[Algorithm] Full Random Triggered: Winner=${winner}`);
-      return winner;
+    // 2. Définir le working set (Logic 1-zero exclusion)
+    let workingSet: number[] = [];
+    if (zeros.length === 1) {
+      workingSet = positive;
+    } else {
+      workingSet = numbers;
     }
 
-    // --- PARTIAL MINIMUM SELECTION (CAS 1, 2, 3, 5) ---
-    // Work only on positive entries, ignore 0s.
-    const minAmount = Math.min(...positiveEntries.map(e => e.total));
-    const candidates = positiveEntries
-      .filter(e => e.total === minAmount)
-      .map(e => e.number);
+    // 3. Trouver le minimum
+    const totals = workingSet.map(n => Number(snapshotTotals[n]) || 0);
+    const minTotal = Math.min(...totals);
+    const candidates = workingSet.filter(n => (Number(snapshotTotals[n]) || 0) === minTotal);
 
-    // Return random among min candidates (Handles Cas 3, 5, 1)
-    const winner = candidates[crypto.randomInt(0, candidates.length)]!;
-    
-    console.log(`[Algorithm] Success: Winner=${winner}, MinAmount=${minAmount}, Candidates=${candidates}`);
-    return winner;
+    // 4. Choisir le gagnant de manière DÉTERMINISTE (Auditable)
+    let winner: number;
+    let hashUsed: string | undefined;
+
+    if (candidates.length === 1) {
+      winner = candidates[0]!;
+    } else {
+      // Si plusieurs candidats, on utilise le hash de la seed (snapshotHash)
+      hashUsed = crypto.createHash('sha256').update(seed).digest('hex');
+      // Utilisation du modulo sur les 16 premiers caractères (64 bits) pour l'index
+      const hashInt = BigInt("0x" + hashUsed.substring(0, 16));
+      const index = Number(hashInt % BigInt(candidates.length));
+      winner = candidates[index]!;
+    }
+
+    return { winner, zeros, workingSet, minTotal, candidates, hashUsed };
   }
 
   /**
@@ -127,7 +143,6 @@ export class DrawService {
       if (!drawDoc.exists) throw new Error('Draw not found');
       const drawData = drawDoc.data() as Draw;
 
-      // ANTI-RACE CONDITION: State + Lock Check
       if (drawData.status !== 'CLOSED') {
         throw new Error(`Draw must be CLOSED to resolve. Current status: ${drawData.status}`);
       }
@@ -136,31 +151,96 @@ export class DrawService {
         return;
       }
 
-      const snapshot = drawData.snapshotTotals;
+      const snapshotTotals = drawData.snapshotTotals;
       const totalPool = drawData.totalPool || 0;
-      if (!snapshot) throw new Error('No snapshot found for draw resolution');
+      const displayMultiplier = drawData.multiplier || 5;
+      const snapshotHash = drawData.snapshotHash;
 
-      // Use the Profit-Guarantee algorithm
-      const winningNumber = this.resolveWinningNumber(snapshot, totalPool);
+      if (!snapshotTotals || !snapshotHash) {
+        throw new Error(`Critical Data Missing for Resolution (Snapshot or Hash). Draw: ${drawId}`);
+      }
 
-      // Multiplier Calculations
-      const multiplier = drawData.multiplier || 5;
+      // ÉTAPE 1 — SÉLECTION DU GAGNANT (DÉTERMINISTE via snapshotHash)
+      let { winner, zeros, workingSet, minTotal, candidates, hashUsed } = this.resolveWinningNumber(snapshotTotals, snapshotHash);
+      
+      // ÉTAPE 2 — CALCUL FINANCIER INITIAL
+      let totalWinnerBets = Number(snapshotTotals[winner]) || 0;
+      let realMultiplier = displayMultiplier;
+      let safetyTriggered = false;
+      let fallbackUsed: string | null = null;
 
-      // Finalize State and LOCK immediately
+      // ÉTAPE 3 — VALIDATION & PLAFONNEMENT
+      const MAX_MULTIPLIER = 10;
+      
+      // Plafonnement initial au max autorisé
+      realMultiplier = Math.min(realMultiplier, MAX_MULTIPLIER);
+
+      let totalPayout = totalWinnerBets * realMultiplier;
+
+      if (totalPayout > totalPool) {
+        safetyTriggered = true;
+        // CAS 2 — RISQUE DE PERTE
+        if (zeros.length === 1) {
+          // CAS 2A — un seul zéro existait -> utiliser ce zéro (Aucun Gain)
+          winner = zeros[0]!;
+          realMultiplier = 0;
+          totalWinnerBets = 0;
+          totalPayout = 0;
+          fallbackUsed = "ZERO_SWAP";
+          console.log(`[Algorithm] Safety Triggered: Swapping to ignored zero: ${winner}`);
+        } else {
+          // CAS 2B — sinon -> ajuster le multiplicateur dynamiquement
+          realMultiplier = totalWinnerBets > 0 ? totalPool / totalWinnerBets : 0;
+          // Re-cap au plafond si besoin (théoriquement déjà inclus dans la division)
+          realMultiplier = Math.min(realMultiplier, MAX_MULTIPLIER);
+          totalPayout = totalWinnerBets * realMultiplier;
+          fallbackUsed = "MULTIPLIER_ADJUST";
+          console.log(`[Algorithm] Safety Triggered: Adjusting multiplier: ${realMultiplier}`);
+        }
+      }
+
+      // SÉCURITÉ SPÉCIALE : Aucun pari gagnant -> realMultiplier = 0
+      if (totalWinnerBets === 0) {
+        realMultiplier = 0;
+        totalPayout = 0;
+      }
+
+      // 🔒 CONTRAINTE ABSOLUE (Assertion Finale)
+      if (totalWinnerBets * realMultiplier > totalPool) {
+        throw new Error(`CRITICAL FAIL: Payout (${totalWinnerBets * realMultiplier}) would exceed pool (${totalPool})!`);
+      }
+
+      // Enregistrement de l'état final
       t.update(drawRef, {
         status: 'RESOLVED',
         locked: true,
-        winningNumber,
+        winningNumber: winner,
+        realMultiplier,
+        totalPool,
+        snapshotTotals,
         resolvedAt: new Date().toISOString(),
         updated_at: new Date().toISOString()
       });
 
+      // 📊 LOGS AUDIT COMPLETS (Auditable par un tiers)
       auditData = { 
         drawId, 
-        winningNumber, 
-        totalPool, 
-        multiplier,
-        payoutAmount: (snapshot[winningNumber] || 0) * multiplier
+        seed: snapshotHash,
+        hashUsed: hashUsed || "NONE (SINGLE CANDIDATE)",
+        zeros,
+        workingSet,
+        minTotal,
+        candidates,
+        winner,
+        totalWinnerBets,
+        totalPool,
+        displayMultiplier,
+        realMultiplier,
+        maxMultiplier: MAX_MULTIPLIER,
+        totalPayout,
+        safetyTriggered,
+        fallbackUsed,
+        timestamp: new Date().toISOString()
       };
     });
 
