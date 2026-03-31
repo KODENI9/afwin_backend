@@ -20,6 +20,9 @@ import { startDrawScheduler } from './jobs/drawScheduler';
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Requis pour Render/Vercel pour que express-rate-limit identifie correctement les IPs
+app.set('trust proxy', 1);
+
 // LOGGING D'URGENCE : Voir toutes les requêtes entrantes
 app.use((req, res, next) => {
   console.log(`[HTTP] ${new Date().toISOString()} ${req.method} ${req.url}`);
