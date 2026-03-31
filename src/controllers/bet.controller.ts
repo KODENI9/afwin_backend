@@ -342,7 +342,14 @@ export const getMyHistory = async (req: AuthenticatedRequest, res: Response) => 
       });
     });
 
-    return res.status(200).json({ history: groupedData, nextCursor });
+    return res.status(200).json({ 
+      history: groupedData, 
+      nextCursor,
+      debug: { 
+        projectId: process.env.FIREBASE_PROJECT_ID || 'ID-NON-CONFIGURE',
+        count: bets.length
+      }
+    });
 
   } catch (error: any) {
     console.error('Fatal Error fetching bet history:', error);
