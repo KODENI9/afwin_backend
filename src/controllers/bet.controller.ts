@@ -344,11 +344,7 @@ export const getMyHistory = async (req: AuthenticatedRequest, res: Response) => 
 
     return res.status(200).json({ 
       history: groupedData, 
-      nextCursor,
-      debug: { 
-        projectId: process.env.FIREBASE_PROJECT_ID || 'ID-NON-CONFIGURE',
-        count: bets.length
-      }
+      nextCursor
     });
 
   } catch (error: any) {
