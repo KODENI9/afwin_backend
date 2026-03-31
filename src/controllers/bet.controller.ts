@@ -230,12 +230,24 @@ export const getMyHistory = async (req: AuthenticatedRequest, res: Response) => 
 
   const limit = parseInt(req.query.limit as string) || 20;
   const lastDocId = req.query.lastDocId as string;
+  const startDate = req.query.startDate as string;
+  const endDate = req.query.endDate as string;
 
   try {
-    let query = db.collection('bets')
+    let query: any = db.collection('bets')
       .where('user_id', '==', userId);
 
-    // Try with ordering (Requires Index)
+    if (startDate) {
+      query = query.where('createdAt', '>=', startDate);
+    }
+    if (endDate) {
+      query = query.where('createdAt', '<=', endDate);
+    }
+
+    let snapshot;
+    let nextCursor = null;
+    let bets: Bet[] = [];
+
     try {
       let finalQuery = query.orderBy('createdAt', 'desc').limit(limit);
       
@@ -246,31 +258,103 @@ export const getMyHistory = async (req: AuthenticatedRequest, res: Response) => 
         }
       }
 
-      const snapshot = await finalQuery.get();
-      const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-      const nextCursor = snapshot.docs.length === limit ? snapshot.docs[snapshot.docs.length - 1]?.id : null;
-      return res.status(200).json({ bets, nextCursor });
-
+      snapshot = await finalQuery.get();
+      bets = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() as Bet }));
+      nextCursor = snapshot.docs.length === limit ? snapshot.docs[snapshot.docs.length - 1]?.id : null;
     } catch (queryError: any) {
-      console.error(`[Firestore Query Error] Error fetching grouped history with OrderBy. Check if index is missing:`, queryError.message);
-      
-      // FALLBACK: Fetch without ordering if index is missing, to avoid 500
-      const snapshot = await query.limit(limit).get();
-      const bets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-      
-      // Tri en mémoire robuste (supporte ISO strings et Timestamps)
-      const getMs = (val: any) => {
-        if (!val) return 0;
-        if (typeof val === 'string') return new Date(val).getTime();
-        if (val.toDate) return val.toDate().getTime();
-        return new Date(val).getTime();
-      };
-      bets.sort((a, b) => getMs(b.createdAt) - getMs(a.createdAt));
-      
-      return res.status(200).json({ bets, nextCursor: null, fallbackMode: true });
+      if (queryError.message.includes('FAILED_PRECONDITION')) {
+        console.warn('[getMyHistory] Index Missing Fallback: Fetching without OrderBy.');
+        // Fallback: Fetch without ordering, then sort in memory
+        snapshot = await query.limit(limit * 2).get(); // Fetch more to ensure we have enough after sorting
+        bets = snapshot.docs.map((doc: any) => ({ id: doc.id, ...doc.data() as Bet }));
+        
+        // Robust sort (supports ISO strings)
+        bets.sort((a: Bet, b: Bet) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        
+        // Apply limit after manual sort
+        bets = bets.slice(0, limit);
+        nextCursor = null; // Pagination is disabled in fallback mode
+      } else {
+        throw queryError;
+      }
     }
+
+    if (bets.length === 0) {
+      return res.status(200).json({ history: [], nextCursor: null });
+    }
+
+    // Identify unique draw IDs
+    const drawIds = [...new Set(bets.map((b: Bet) => b.draw_id))].filter(id => !!id);
+
+    // Batch fetch draws (using FieldPath for robustness)
+    const FieldPath = require('firebase-admin').firestore.FieldPath;
+    const drawsMap: Record<string, Draw> = {};
+
+    if (drawIds.length > 0) {
+      try {
+        const drawsSnapshot = await db.collection('draws')
+          .where(FieldPath.documentId(), 'in', drawIds)
+          .get();
+        
+        drawsSnapshot.docs.forEach((doc: any) => {
+          drawsMap[doc.id] = doc.data() as Draw;
+        });
+      } catch (drawFetchErr: any) {
+        console.error('[getMyHistory] Error fetching associated draws:', drawFetchErr.message);
+        // We continue with empty drawsMap to allow bets to be seen anyway
+      }
+    }
+
+    // Group bets by draw_id (maintaining order by createdAt)
+    const groupedData: any[] = [];
+    const drawOrder: string[] = [];
+
+    bets.forEach((bet: Bet) => {
+      if (!drawOrder.includes(bet.draw_id)) {
+        drawOrder.push(bet.draw_id);
+      }
+    });
+
+    drawOrder.forEach((drawId: string) => {
+      const draw = drawsMap[drawId];
+      // Fallback if draw metadata is missing
+      const drawBets = bets.filter((b: Bet) => b.draw_id === drawId);
+      const totalBetAmount = drawBets.reduce((sum: number, b: Bet) => sum + b.amount, 0);
+      const totalWinAmount = drawBets.reduce((sum: number, b: Bet) => sum + (b.status === 'WON' ? (b.payoutAmount || 0) : 0), 0);
+
+      groupedData.push({
+        drawId,
+        startTime: draw?.startTime || '?',
+        endTime: draw?.endTime || '?',
+        status: draw?.status || 'UNKNOWN',
+        winningNumber: draw?.winningNumber,
+        realMultiplier: draw?.realMultiplier,
+        bets: drawBets.map((b: Bet) => ({
+          number: b.number,
+          amount: b.amount,
+          status: b.status,
+          payoutAmount: b.payoutAmount,
+          createdAt: b.createdAt
+        })),
+        totalBetAmount,
+        totalWinAmount,
+        date: drawBets[0]?.createdAt 
+      });
+    });
+
+    return res.status(200).json({ history: groupedData, nextCursor });
+
   } catch (error: any) {
     console.error('Fatal Error fetching bet history:', error);
+    
+    // Check if it's an index error
+    if (error.message?.includes('FAILED_PRECONDITION')) {
+      return res.status(400).json({ 
+        error: 'Index required', 
+        message: 'A composite index is required for this query. Please check your Firestore logs.' 
+      });
+    }
+
     res.status(500).json({ error: 'Failed to fetch bet history', message: error.message });
   }
 };
