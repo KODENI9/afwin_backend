@@ -9,7 +9,9 @@ function runSimulation(label: string, snapshot: Record<number, number>, iteratio
 
   const results: Record<number, number> = {};
   for (let i = 0; i < iterations; i++) {
-    const winner = DrawService.resolveWinningNumber(snapshot, totalPool);
+    // We pass a dummy string seed based on totalPool for simulation
+    const resolution = DrawService.resolveWinningNumber(snapshot, totalPool.toString());
+    const winner = resolution.winner;
     results[winner] = (results[winner] || 0) + 1;
   }
   
