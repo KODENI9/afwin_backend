@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { db } from '../config/firebase';
 import { AuthenticatedRequest } from '../middleware/auth';
-import { Bet, Draw, Transaction, Notification, UserProfile, Network } from '../types';
+import { Bet, Draw, Transaction, Notification, UserProfile, Network, UserRole, GlobalNotification } from '../types';
 import { extractTxId } from '../utils/smsParser';
 
 import { DrawService } from '../services/draw.service';
@@ -36,14 +36,14 @@ export const resolveDraw = async (req: AuthenticatedRequest, res: Response) => {
       await DrawService.closeDraw(draw_id);
     }
 
-    // 2. Resolve (Deterministically find winner based on snapshot)
+    // 3. Resolve (Deterministically find winner based on snapshot)
     await DrawService.resolveDraw(draw_id);
 
-    // 3. Payout
+    // 4. Payout
     await PayoutService.distributePayouts(draw_id);
 
-    // 4. Audit Log
-    await logAudit(AuditAction.DRAW_RESOLVED, { draw_id }, adminId, undefined, 0, draw_id);
+    // 5. Audit Log
+    await logAudit(AuditAction.DRAW_RESOLVED, { draw_id, method: 'manual_super_admin' }, adminId, undefined, 0, draw_id);
 
     res.status(200).json({ success: true, message: 'Draw resolved and payouts distributed.' });
   } catch (error: any) {
@@ -544,9 +544,10 @@ export const getUserTransactions = async (req: AuthenticatedRequest, res: Respon
     const getMs = (val: any) => {
       if (!val) return 0;
       if (typeof val === 'string') return new Date(val).getTime();
-      if (val.toDate) return val.toDate().getTime();
+      if (val.toDate) return (val as any).toDate().getTime();
       return new Date(val).getTime();
     };
+
     transactions.sort((a, b) => getMs(b.created_at || b.createdAt) - getMs(a.created_at || a.createdAt));
 
     res.status(200).json(transactions);
@@ -555,43 +556,288 @@ export const getUserTransactions = async (req: AuthenticatedRequest, res: Respon
     res.status(500).json({ error: error.message });
   }
 };
+/**
+ * ADMIN V2: Create a global notification proposal
+ * Restricted to 3 PENDING max per admin.
+ */
+export const createGlobalNotification = async (req: AuthenticatedRequest, res: Response) => {
+  const { title, message, type, target, user_id } = req.body;
+  const adminId = req.auth?.userId;
 
-export const sendAdminNotification = async (req: AuthenticatedRequest, res: Response) => {
-  const { user_id, title, message, type, target } = req.body; // target: 'user' | 'all'
-  
+  if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
   if (!title || !message) return res.status(400).json({ error: 'Titre et message obligatoires' });
 
   try {
-    const now = new Date().toISOString();
-    const notificationBase = { 
-      title, 
-      message, 
-      type: type || 'info', 
-      read: false, 
-      created_at: now 
-    };
+    const adminProfileRef = await db.collection('profiles').doc(adminId).get();
+    const isSuperAdmin = adminProfileRef.exists && adminProfileRef.data()?.role === 'super_admin';
 
-    if (target === 'all') {
-      const usersSnapshot = await db.collection('profiles').get();
-      const batch = db.batch();
-      
-      usersSnapshot.docs.forEach(userDoc => {
-        const notifRef = db.collection('notifications').doc();
-        batch.set(notifRef, { ...notificationBase, user_id: userDoc.id });
-      });
-      
-      await batch.commit();
-      return res.status(200).json({ success: true, message: `Notification envoyée à ${usersSnapshot.size} utilisateurs.` });
-    } else {
-      if (!user_id) return res.status(400).json({ error: 'ID utilisateur requis' });
-      await db.collection('notifications').add({ ...notificationBase, user_id });
-      return res.status(200).json({ success: true, message: 'Notification envoyée.' });
+    if (!isSuperAdmin) {
+      // 1. Anti-Spam Check: Max 3 PENDING per normal admin
+      const pendingCount = await db.collection('global_notifications')
+        .where('createdBy', '==', adminId)
+        .where('status', '==', 'PENDING')
+        .get();
+
+      if (pendingCount.size >= 3) {
+        return res.status(429).json({ 
+          error: 'Limite atteinte', 
+          message: 'Vous avez déjà 3 notifications en attente de validation. Veuillez attendre la validation du Super Admin.' 
+        });
+      }
     }
+
+    const newNotif: Omit<GlobalNotification, 'id'> = {
+      title,
+      message,
+      type: type || 'info',
+      target: target || 'all',
+      targetUserId: user_id || undefined,
+      status: isSuperAdmin ? 'APPROVED' : 'PENDING',
+      createdBy: adminId,
+      createdAt: new Date().toISOString()
+    };
+    
+    if (isSuperAdmin) {
+      newNotif.validatedBy = adminId;
+      newNotif.validatedAt = new Date().toISOString();
+    }
+
+    const docRef = await db.collection('global_notifications').add(newNotif);
+    
+    if (isSuperAdmin) {
+       // DO FAN-OUT OR SPECIFIC SEND IMMEDIATELY
+       let sentCount = 0;
+       
+       if (newNotif.target === 'user' && newNotif.targetUserId) {
+         // Send to specific user
+         const userNotifRef = db.collection('notifications').doc();
+         await userNotifRef.set({
+           user_id: newNotif.targetUserId,
+           title: newNotif.title,
+           message: newNotif.message,
+           type: newNotif.type === 'warning' ? 'system' : newNotif.type === 'success' ? 'win' : 'info',
+           read: false,
+           created_at: new Date().toISOString()
+         });
+         sentCount = 1;
+       } else {
+         // Global Fan-out
+         const usersSnapshot = await db.collection('profiles').get();
+         const batchSize = 500;
+         const batches = [];
+         
+         let currentBatch = db.batch();
+         let count = 0;
+
+         for (const userDoc of usersSnapshot.docs) {
+           const userNotifRef = db.collection('notifications').doc();
+           currentBatch.set(userNotifRef, {
+             user_id: userDoc.id,
+             title: newNotif.title,
+             message: newNotif.message,
+             type: newNotif.type === 'warning' ? 'system' : newNotif.type === 'success' ? 'win' : 'info',
+             read: false,
+             created_at: new Date().toISOString()
+           });
+
+           count++;
+           if (count >= batchSize) {
+             batches.push(currentBatch.commit());
+             currentBatch = db.batch();
+             count = 0;
+           }
+         }
+         
+         if (count > 0) batches.push(currentBatch.commit());
+         await Promise.all(batches);
+         sentCount = usersSnapshot.size;
+       }
+
+       // Audit Log
+       await logAudit(AuditAction.UPDATE_PERMISSIONS, { 
+         action: 'NOTIFICATION_CREATED_AND_APPROVED', 
+         notificationId: docRef.id,
+         target: newNotif.target || 'all'
+       }, adminId);
+
+       return res.status(201).json({ 
+         success: true, 
+         id: docRef.id, 
+         message: `Notification créée et envoyée directement (Super Admin) à ${sentCount} utilisateur(s).` 
+       });
+    }
+
+    // Normal Admin Audit Log (PENDING)
+    await logAudit(AuditAction.UPDATE_PERMISSIONS, { action: 'NOTIFICATION_CREATED', notificationId: docRef.id }, adminId);
+
+    res.status(201).json({ 
+      success: true, 
+      id: docRef.id, 
+      message: 'Votre notification a été créée et est en attente de validation par un Super Admin.' 
+    });
   } catch (error: any) {
-    console.error('sendAdminNotification error:', error);
+    console.error('createGlobalNotification error:', error);
     res.status(500).json({ error: error.message });
   }
 };
+
+/**
+ * SUPER_ADMIN: List all PENDING notifications
+ */
+export const getPendingNotifications = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snapshot = await db.collection('global_notifications')
+      .where('status', '==', 'PENDING')
+      .get();
+
+    const notifications = await Promise.all(snapshot.docs.map(async doc => {
+      const data = doc.data();
+      const creatorDoc = await db.collection('profiles').doc(data.createdBy).get();
+      return { 
+        id: doc.id, 
+        ...data,
+        creatorName: creatorDoc.exists ? creatorDoc.data()?.display_name : 'Admin inconnu'
+      };
+    }));
+
+    res.status(200).json(notifications);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * SUPER_ADMIN: Approve and send notification
+ */
+export const approveNotification = async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const superAdminId = req.auth?.userId;
+
+  if (!superAdminId) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const notifRef = db.collection('global_notifications').doc(id as string);
+    const notifDoc = await notifRef.get();
+
+    if (!notifDoc.exists) return res.status(404).json({ error: 'Notification introuvable' });
+    const notifData = notifDoc.data() as GlobalNotification;
+
+    if (notifData.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Cette notification a déjà été traitée.' });
+    }
+
+    // 1. Update status
+    await notifRef.update({
+      status: 'APPROVED',
+      validatedBy: superAdminId as string,
+      validatedAt: new Date().toISOString()
+    });
+
+    // 2. Perform Fan-out (Send to all users) OR send to specific user
+    let sentCount = 0;
+    
+    if (notifData.target === 'user' && notifData.targetUserId) {
+      // Send to specific user
+      const userNotifRef = db.collection('notifications').doc();
+      await userNotifRef.set({
+        user_id: notifData.targetUserId,
+        title: notifData.title,
+        message: notifData.message,
+        type: notifData.type === 'warning' ? 'system' : notifData.type === 'success' ? 'win' : 'info',
+        read: false,
+        created_at: new Date().toISOString()
+      });
+      sentCount = 1;
+    } else {
+      // Global Fan-out
+      const usersSnapshot = await db.collection('profiles').get();
+      const batchSize = 500;
+      const batches = [];
+      
+      let currentBatch = db.batch();
+      let count = 0;
+
+      for (const userDoc of usersSnapshot.docs) {
+        const userNotifRef = db.collection('notifications').doc();
+        currentBatch.set(userNotifRef, {
+          user_id: userDoc.id,
+          title: notifData.title,
+          message: notifData.message,
+          type: notifData.type === 'warning' ? 'system' : notifData.type === 'success' ? 'win' : 'info',
+          read: false,
+          created_at: new Date().toISOString()
+        });
+
+        count++;
+        if (count >= batchSize) {
+          batches.push(currentBatch.commit());
+          currentBatch = db.batch();
+          count = 0;
+        }
+      }
+      
+      if (count > 0) batches.push(currentBatch.commit());
+      await Promise.all(batches);
+      sentCount = usersSnapshot.size;
+    }
+
+    // Audit Log
+    await logAudit(AuditAction.UPDATE_PERMISSIONS, { 
+      action: 'NOTIFICATION_APPROVED', 
+      notificationId: id, 
+      createdBy: notifData.createdBy,
+      target: notifData.target || 'all'
+    }, superAdminId);
+
+    res.status(200).json({ success: true, message: `Notification approuvée et envoyée à ${sentCount} utilisateur(s).` });
+  } catch (error: any) {
+    console.error('approveNotification error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * SUPER_ADMIN: Reject notification
+ */
+export const rejectNotification = async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  const superAdminId = req.auth?.userId;
+
+  if (!superAdminId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!reason) return res.status(400).json({ error: 'Le motif du rejet est obligatoire.' });
+
+  try {
+    const notifRef = db.collection('global_notifications').doc(id as string);
+    const notifDoc = await notifRef.get();
+
+    if (!notifDoc.exists) return res.status(404).json({ error: 'Notification introuvable' });
+    const notifData = notifDoc.data() as GlobalNotification;
+
+    if (notifData.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Cette notification a déjà été traitée.' });
+    }
+
+    await notifRef.update({
+      status: 'REJECTED',
+      validatedBy: superAdminId as string,
+      validatedAt: new Date().toISOString(),
+      rejectionReason: reason
+    });
+
+    // Audit Log
+    await logAudit(AuditAction.UPDATE_PERMISSIONS, { 
+      action: 'NOTIFICATION_REJECTED', 
+      notificationId: id, 
+      reason 
+    }, superAdminId);
+
+    res.status(200).json({ success: true, message: 'Notification rejetée.' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 
 export const getDailyStats = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -635,20 +881,46 @@ export const getAuditLogs = async (req: AuthenticatedRequest, res: Response) => 
 };
 
 export const getGlobalStats = async (req: AuthenticatedRequest, res: Response) => {
+  const adminId = req.auth?.userId;
+  if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
+
   try {
+    // Check if SUPER_ADMIN for full financial access
+    const adminDoc = await db.collection('profiles').doc(adminId as string).get();
+    const isAdminSuper = adminDoc.exists && adminDoc.data()?.role === UserRole.SUPER_ADMIN;
+
     const kpis = await AnalyticsService.getGlobalKPIs();
     
-    // We keep compatibility with the old frontend chart values
-    const snapshot = await db.collection('bets').orderBy('createdAt', 'desc').limit(100).get();
-    const bets = snapshot.docs.map(doc => doc.data() as Bet);
-
-    // Grouping for the chart (Simplified fallback)
-    const dailyStats: any[] = []; // In a real app we fetch this from dailyHistory
+    if (!isAdminSuper) {
+      // Return only basics
+      return res.status(200).json({
+        summary: {
+          totalUsers: kpis.totalUsers,
+          totalBets: kpis.totalBets
+          // ALL SENSITIVE DATA REMOVED
+        }
+      });
+    }
 
     res.status(200).json({
       summary: kpis,
-      dailyStats: [], // Old charts will be replaced 
+      dailyStats: [], 
       hourlyStats: []
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * ADMIN V2: Get basic stats only
+ */
+export const getBasicStats = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const kpis = await AnalyticsService.getGlobalKPIs();
+    res.status(200).json({
+      totalUsers: kpis.totalUsers,
+      totalBets: kpis.totalBets
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

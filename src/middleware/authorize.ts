@@ -52,6 +52,7 @@ export const authorize = (requiredPermission?: AdminPermission) => {
           return next();
         }
 
+        console.warn(`[Authorize] Access denied: User ${userId} (ADMIN) missing permission [${requiredPermission}] for ${req.path}`);
         return res.status(403).json({ 
           error: 'Forbidden', 
           message: `Accès refusé. Vous n'avez pas la permission [${requiredPermission}].` 
@@ -59,7 +60,7 @@ export const authorize = (requiredPermission?: AdminPermission) => {
       }
 
       // 3. Simple USER -> No access to admin routes
-      console.warn(`[Authorize] Denied: User ${userId} with role ${role} tried accessing ${req.path}`);
+      console.warn(`[Authorize] SECURITY ALERT: User ${userId} (USER) tried accessing ${req.path}`);
       return res.status(403).json({ error: 'Forbidden', message: 'Accès réservé aux administrateurs.' });
 
     } catch (error) {

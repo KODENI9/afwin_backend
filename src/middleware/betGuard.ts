@@ -25,21 +25,22 @@ export const betGuard = async (req: AuthenticatedRequest, res: Response, next: N
       return res.status(403).json({ error: 'Les mises sont fermées pour ce tirage.' });
     }
 
-    // 2. Check Server Time
-    const now = new Date();
-    // Assuming resolve is at 18:00, cutoff is 17:45
-    // We can also make this dynamic by storing cutoff in drawData if needed
-    const cutoffDate = new Date(drawData.draw_date + 'T17:45:00'); 
+    // 2. Check Time dynamically against draw's explicit endTime
+    const nowMs = new Date().getTime();
     
-    // Note: ensure timezone consistency. If Africa/Abidjan is UTC, use T17:45:00Z
-    // For now, let's use the local hour check if TZ is set on the server
-    const currentHour = now.getHours();
-    const currentMinute = now.getMinutes();
-    const timeValue = currentHour * 60 + currentMinute;
-    const cutoffValue = 17 * 60 + 45;
+    // Safety check: ensure endTime exists
+    if (drawData.endTime) {
+      const endMs = new Date(drawData.endTime).getTime();
+      
+      // Cutoff is 15 minutes before the draw ends/resolves
+      const cutoffMs = endMs - (15 * 60000); 
 
-    if (timeValue >= cutoffValue) {
-      return res.status(403).json({ error: 'Il est trop tard pour parier aujourd\'hui (Limite 17:45).' });
+      if (nowMs >= cutoffMs) {
+         // Formatting the time for the error message display
+         const cutoffDate = new Date(cutoffMs);
+         const displayTime = `${cutoffDate.getHours().toString().padStart(2, '0')}:${cutoffDate.getMinutes().toString().padStart(2, '0')}`;
+         return res.status(403).json({ error: `Il est trop tard pour parier sur ce créneau (Fermeture: ${displayTime}).` });
+      }
     }
 
     next();

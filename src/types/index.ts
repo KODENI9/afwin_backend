@@ -15,7 +15,9 @@ export enum AdminPermission {
   SEND_GLOBAL_NOTIFICATION = 'SEND_GLOBAL_NOTIFICATION',
   VIEW_AUDIT_LOGS = 'VIEW_AUDIT_LOGS',
   MANAGE_SETTINGS = 'MANAGE_SETTINGS',
-  MANAGE_NETWORKS = 'MANAGE_NETWORKS'
+  MANAGE_NETWORKS = 'MANAGE_NETWORKS',
+  VIEW_DRAWS = 'VIEW_DRAWS',
+  VIEW_BASIC_STATS = 'VIEW_BASIC_STATS'
 }
 
 export interface UserProfile {
@@ -96,6 +98,21 @@ export interface Notification {
   type: 'win' | 'info' | 'system';
   read: boolean;
   created_at: string;
+}
+
+export interface GlobalNotification {
+  id?: string;
+  title: string;
+  message: string;
+  type: 'info' | 'success' | 'warning';
+  target?: 'all' | 'user';
+  targetUserId?: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  createdBy: string; // adminId
+  validatedBy?: string; // superAdminId
+  rejectionReason?: string;
+  createdAt: string;
+  validatedAt?: string;
 }
 
 export interface Network {

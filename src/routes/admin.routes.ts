@@ -5,7 +5,9 @@ import {
   getNetworksAdmin, saveNetwork, deleteNetwork,
   getSettings, updateSettings, listUsers, toggleUserBlock, updateUserBalance,
   getGlobalStats, getFailedSMS, getDailyStats, getSmartPlayers, getProfitSimulations, getAuditLogs,
-  getUserTransactions, sendAdminNotification, getAdmins, updateAdminPermissions
+  getUserTransactions, createGlobalNotification, getPendingNotifications, 
+  approveNotification, rejectNotification, getBasicStats,
+  getAdmins, updateAdminPermissions
 } from '../controllers/admin.controller';
 import { requireAuth } from '../middleware/auth';
 import { setMaintenanceMode } from '../middleware/maintenance';
@@ -45,10 +47,14 @@ router.post('/users/toggle-block', auth, authorize(AdminPermission.MANAGE_USERS)
 router.post('/users/update-balance', auth, authorize(AdminPermission.MANAGE_USERS), updateUserBalance);
 router.get('/users/:user_id/transactions', auth, authorize(AdminPermission.VIEW_FINANCIALS), getUserTransactions);
 
-// Notifications
-router.post('/notifications/send', auth, authorize(AdminPermission.SEND_GLOBAL_NOTIFICATION), sendAdminNotification);
+// Notifications V2
+router.post('/notifications/create', auth, authorize(AdminPermission.SEND_GLOBAL_NOTIFICATION), createGlobalNotification);
+router.get('/notifications/pending', auth, authorize(AdminPermission.VIEW_DASHBOARD), getPendingNotifications);
+router.post('/notifications/:id/approve', auth, authorize(AdminPermission.VIEW_DASHBOARD), approveNotification);
+router.post('/notifications/:id/reject', auth, authorize(AdminPermission.VIEW_DASHBOARD), rejectNotification);
 
 // Stats & Monitoring
+router.get('/stats/basic', auth, authorize(AdminPermission.VIEW_BASIC_STATS), getBasicStats);
 router.get('/stats/global', auth, authorize(AdminPermission.VIEW_PROFIT), getGlobalStats);
 router.get('/stats/daily', auth, authorize(AdminPermission.VIEW_FINANCIALS), getDailyStats);
 router.get('/stats/simulations', auth, authorize(AdminPermission.VIEW_PROFIT), getProfitSimulations);
