@@ -27,13 +27,17 @@ app.use((req, res, next) => {
 });
 
 // ── Security Headers ──────────────────────────────────────────────────────
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // Let the frontend manage its own CSP for simple API calls
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 
 // ── CORS ──────────────────────────────────────────────────────────────────
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   'http://localhost:5173',
-  'http://localhost:4173'
+  'http://localhost:4173',
+  'http://localhost:8080'
 ].filter(Boolean) as string[];
 
 app.use(cors({
@@ -41,16 +45,19 @@ app.use(cors({
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
     
-    const isAllowed = allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development';
+    const isVercel = origin.endsWith('.vercel.app');
+    const isAllowed = allowedOrigins.indexOf(origin) !== -1 || isVercel || process.env.NODE_ENV === 'development';
     
     if (isAllowed) {
       callback(null, true);
     } else {
-      console.warn(`[CORS] Request from origin ${origin} rejected. Allowed: ${JSON.stringify(allowedOrigins)}`);
-      callback(new Error('Not allowed by CORS'));
+      console.warn(`[CORS Blocked] Origin: ${origin}. Expected one of: ${JSON.stringify(allowedOrigins)}`);
+      callback(new Error('CORS Policy: This origin is not allowed.'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // ── JSON body ─────────────────────────────────────────────────────────────
