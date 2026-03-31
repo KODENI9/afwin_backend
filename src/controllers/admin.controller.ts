@@ -664,3 +664,65 @@ export const getFailedSMS = async (req: AuthenticatedRequest, res: Response) => 
     res.status(500).json({ error: error.message });
   }
 };
+
+export const getAdmins = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    // We fetch all profiles that have either 'admin' or 'super_admin' roles
+    const snapshot = await db.collection('profiles')
+      .where('role', 'in', ['admin', 'super_admin'])
+      .get();
+    
+    const admins = snapshot.docs.map(doc => ({ 
+      id: doc.id, 
+      ...doc.data() 
+    }));
+    
+    res.status(200).json(admins);
+  } catch (error: any) {
+    console.error('[AdminController] Error fetching admins:', error);
+    res.status(500).json({ error: 'Failed to fetch admin list' });
+  }
+};
+
+export const updateAdminPermissions = async (req: AuthenticatedRequest, res: Response) => {
+  const { userId, permissions, role } = req.body;
+  const adminId = req.auth?.userId;
+
+  if (!userId) return res.status(400).json({ error: 'User ID is required' });
+  if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    const profileRef = db.collection('profiles').doc(userId);
+    const profileDoc = await profileRef.get();
+
+    if (!profileDoc.exists) {
+      return res.status(404).json({ error: 'Admin user not found' });
+    }
+
+    const updateData: any = {
+      updated_at: new Date().toISOString()
+    };
+
+    if (permissions !== undefined) updateData.permissions = permissions;
+    if (role !== undefined) updateData.role = role;
+
+    await profileRef.update(updateData);
+
+    // Audit log
+    await logAudit(
+      AuditAction.UPDATE_PERMISSIONS,
+      { 
+        targetUser: userId, 
+        newPermissions: permissions, 
+        newRole: role,
+        reason: 'Super Admin update' 
+      },
+      adminId
+    );
+
+    res.status(200).json({ success: true, message: 'Permissions updated successfully' });
+  } catch (error: any) {
+    console.error('[AdminController] Error updating permissions:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
