@@ -73,8 +73,8 @@ export class PayoutService {
 
         let payoutAmount = 0;
         let betStatus: 'WON' | 'LOST' = 'LOST';
-
-        if (betData.number === winningNumber) {
+        
+        if (Number(betData.number) === Number(winningNumber)){
           payoutAmount = Math.floor(betData.amount * effectiveMultiplier);
           betStatus = 'WON';
         }

@@ -63,9 +63,9 @@ export const authorize = (requiredPermission?: AdminPermission) => {
       console.warn(`[Authorize] SECURITY ALERT: User ${userId} (USER) tried accessing ${req.path}`);
       return res.status(403).json({ error: 'Forbidden', message: 'Accès réservé aux administrateurs.' });
 
-    } catch (error) {
-      console.error('[Authorize] CRITICAL ERROR during authorization check:', error);
-      res.status(500).json({ error: 'Internal server error during authorization' });
+    } catch (error: any) {
+      console.error('[Authorize] CRITICAL ERROR during authorization check/route execution:', error);
+      res.status(500).json({ error: 'Internal server error during authorization', details: error.message || String(error) });
     }
   };
 };

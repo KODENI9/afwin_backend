@@ -22,11 +22,12 @@ export const resolveDraw = async (req: AuthenticatedRequest, res: Response) => {
     const adminId = req.auth?.userId;
     if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Ensure the person is an admin (redundant with middleware but safe)
+    // Ensure the person is an admin or super_admin
     const profileRef = db.collection('profiles').doc(adminId);
     const profileDoc = await profileRef.get();
-    if (!profileDoc.exists || profileDoc.data()?.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin only access' });
+    const role = profileDoc.data()?.role;
+    if (!profileDoc.exists || (role !== 'admin' && role !== 'super_admin')) {
+      return res.status(403).json({ error: 'Accès administrateur requis pour cette action.' });
     }
 
     // 1. Close first if not closed
