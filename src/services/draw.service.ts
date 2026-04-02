@@ -119,8 +119,14 @@ export class DrawService {
     const positive = numbers.filter(n => (Number(snapshotTotals[n]) || 0) > 0);
 
     // 2. Définir le working set (Logic Fix: Toujours inclure les Zéros s'ils existent)
-    // BUG FIX: On ne doit PAS exclure les zéros si zeros.length === 1. On veut gagner !
-    const workingSet = numbers;
+    // Si un seul zéro → on l'ignore pour garantir un gagnant réel
+   let workingSet: number[];
+
+    if (zeros.length === 1) {
+      workingSet = positive; // 🔥 on ignore le seul zéro
+    } else {
+      workingSet = numbers;
+    }
 
     // 3. Trouver le minimum
     const totals = workingSet.map(n => Number(snapshotTotals[n]) || 0);
