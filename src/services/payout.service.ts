@@ -53,10 +53,14 @@ export class PayoutService {
 
     while (hasMore) {
       // Fetch a chunk of PENDING bets
+      // const chunkSnapshot = await db.collection('bets')
+      //   .where('draw_id', '==', drawId)
+      //   .where('status', '==', 'PENDING')
+      //   .limit(this.CHUNK_SIZE)
+      //   .get();
+      
       const chunkSnapshot = await db.collection('bets')
         .where('draw_id', '==', drawId)
-        .where('status', '==', 'PENDING')
-        .limit(this.CHUNK_SIZE)
         .get();
 
       if (chunkSnapshot.empty) {
