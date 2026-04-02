@@ -8,59 +8,79 @@ export class DrawService {
    * Closes the draw for betting. Takes a snapshot of all bets.
    * Atomically transitions status from OPEN to CLOSED.
    */
+  /**
+   * Closes the draw for betting. Takes a snapshot of all bets.
+   * Atomically transitions status from OPEN to CLOSED then performs the heavy counting.
+   */
   static async closeDraw(drawId: string): Promise<void> {
+    const drawRef = db.collection('draws').doc(drawId);
     let auditData: any = null;
 
+    // --- PHASE 1: LOCKING (Atomic Transition) ---
+    // This blocks all calls to placeBet immediately.
     await db.runTransaction(async (t) => {
-      const drawRef = db.collection('draws').doc(drawId);
       const drawDoc = await t.get(drawRef);
-
       if (!drawDoc.exists) throw new Error('Draw not found');
       const drawData = drawDoc.data() as Draw;
 
-      // Strict check that the draw is OPEN
       if (drawData.status !== 'OPEN') {
         throw new Error(`Draw ${drawId} is not OPEN (current status: ${drawData.status})`);
       }
 
-      // 1. Snapshot totals - Ensure strict 1-9 range and valid amounts
+      t.update(drawRef, { 
+        status: 'CLOSED', 
+        closedAt: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+    });
+
+    console.log(`[Draw] Phase 1 Complete: Draw ${drawId} is now LOCKED (CLOSED).`);
+
+    // --- PHASE 2: SNAPSHOTTING ---
+    // Now that no more bets can enter, we can safely count them.
+    await db.runTransaction(async (t) => {
+      const drawDoc = await t.get(drawRef);
+      const drawData = drawDoc.data() as Draw;
+
+      // In case we are retrying Phase 2, ensure it's still CLOSED
+      if (drawData.status !== 'CLOSED') {
+        throw new Error(`Unexpected status ${drawData.status} during Phase 2 snapshot.`);
+      }
+
       const betsSnapshot = await t.get(db.collection('bets').where('draw_id', '==', drawId));
       
       const snapshotTotals: Record<number, number> = {};
       for (let i = 1; i <= 9; i++) snapshotTotals[i] = 0;
 
       let totalPool = 0;
+
       betsSnapshot.docs.forEach(doc => {
         const bet = doc.data() as Bet;
         const num = Number(bet.number);
         const amt = Number(bet.amount);
 
-        if (isNaN(num) || num < 1 || num > 9) {
-          console.warn(`[Draw] Skipping invalid entry number ${bet.number} for draw ${drawId}`);
-          return;
-        }
+        if (isNaN(num) || num < 1 || num > 9) return;
         if (isNaN(amt) || amt <= 0) return;
 
         snapshotTotals[num] = (snapshotTotals[num] || 0) + amt;
         totalPool += amt;
       });
 
-      // 2. Security Hash
+      console.log(`[DrawAudit] Snapshot for ${drawId}: ${betsSnapshot.size} bets, Total: ${totalPool}`);
+
+      // Security Hash
       const timestamp = new Date().toISOString();
       const hashContent = JSON.stringify({ snapshotTotals, totalPool, drawId, timestamp });
       const snapshotHash = crypto.createHash('sha256').update(hashContent).digest('hex');
 
-      // 3. Update Draw
       t.update(drawRef, {
-        status: 'CLOSED',
         totalPool,
         snapshotTotals,
         snapshotHash,
-        closedAt: timestamp,
         updated_at: timestamp
       });
 
-      auditData = { drawId, totalPool, snapshotHash };
+      auditData = { drawId, totalPool, snapshotHash, betCount: betsSnapshot.size };
     });
 
     if (auditData) {
@@ -98,18 +118,16 @@ export class DrawService {
     const zeros = numbers.filter(n => (Number(snapshotTotals[n]) || 0) === 0);
     const positive = numbers.filter(n => (Number(snapshotTotals[n]) || 0) > 0);
 
-    // 2. Définir le working set (Logic 1-zero exclusion)
-    let workingSet: number[] = [];
-    if (zeros.length === 1) {
-      workingSet = positive;
-    } else {
-      workingSet = numbers;
-    }
+    // 2. Définir le working set (Logic Fix: Toujours inclure les Zéros s'ils existent)
+    // BUG FIX: On ne doit PAS exclure les zéros si zeros.length === 1. On veut gagner !
+    const workingSet = numbers;
 
     // 3. Trouver le minimum
     const totals = workingSet.map(n => Number(snapshotTotals[n]) || 0);
     const minTotal = Math.min(...totals);
     const candidates = workingSet.filter(n => (Number(snapshotTotals[n]) || 0) === minTotal);
+
+    console.log(`[Audit] resolveWinningNumber: zeros=${zeros}, workingSet=${workingSet}, minTotal=${minTotal}, candidates=${candidates}`);
 
     // 4. Choisir le gagnant de manière DÉTERMINISTE (Auditable)
     let winner: number;

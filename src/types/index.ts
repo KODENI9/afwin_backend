@@ -51,6 +51,7 @@ export interface Draw {
   winningNumber?: number;
   snapshotTotals?: Record<number, number>; // {1: 1000, 2: 500, ...}
   snapshotHash?: string; // SHA256 of snapshotTotals
+  closedAt?: string;
   resolvedAt?: string;
   payoutStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED';
   totalPayout?: number;
@@ -72,7 +73,9 @@ export interface Bet {
   status: 'PENDING' | 'WON' | 'LOST';
   payoutAmount: number;
   createdAt: string;
+  updated_at?: string;
   resolvedAt?: string;
+  metadata?: any;
 }
 
 export interface Transaction {

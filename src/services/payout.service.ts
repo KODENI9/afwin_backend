@@ -67,17 +67,42 @@ export class PayoutService {
       console.log(`Processing chunk of ${chunkSnapshot.size} bets (Total so far: ${totalPaid} CFA)...`);
 
       for (const betDoc of chunkSnapshot.docs) {
+        const betId = betDoc.id;
         const betData = betDoc.data() as Bet;
         const userId = betData.user_id;
-        const idempotencyKey = `PAYOUT_${drawId}_${betDoc.id}`;
+
+        // --- CONSISTENCY CHECK (Phantom Bet Protection) ---
+        // A bet is considered "Phantom" if it arrived after the official closedAt timestamp.
+        const isLate = betData.createdAt && drawData.closedAt && (new Date(betData.createdAt).getTime() > new Date(drawData.closedAt).getTime());
+
+        if (isLate) {
+          console.warn(`[PayoutAudit] PHANTOM BET SKIPPED: Bet ${betId} (Created: ${betData.createdAt}) was placed after Draw ${drawId} closed (Closed: ${drawData.closedAt}).`);
+          // We mark it as LOST to prevent it from reappearing in PENDING queries, but log it as phantom.
+          await betDoc.ref.update({ 
+            status: 'LOST', 
+            payoutAmount: 0,
+            metadata: { error: 'PHANTOM_BET_DETECTED', source: 'payout_service' }
+          });
+          continue; 
+        }
+
+        const idempotencyKey = `PAYOUT_${drawId}_${betId}`;
 
         let payoutAmount = 0;
         let betStatus: 'WON' | 'LOST' = 'LOST';
         
-        if (Number(betData.number) === Number(winningNumber)){
+        const isWinner = Number(betData.number) === Number(winningNumber);
+        
+        if (isWinner) {
           payoutAmount = Math.floor(betData.amount * effectiveMultiplier);
           betStatus = 'WON';
+          
+          if (payoutAmount === 0 && effectiveMultiplier === 0) {
+            console.log(`[PayoutAudit] Winning Bet ${betId} resolved with 0 CFA due to safety multiplier (Safety Swap).`);
+          }
         }
+
+        console.log(`[PayoutAudit] Processing Bet ${betId}: User=${userId}, Num=${betData.number}, WinNum=${winningNumber}, Win=${isWinner}, Payout=${payoutAmount}`);
 
         try {
           await db.runTransaction(async (t) => {
@@ -87,6 +112,7 @@ export class PayoutService {
             );
             
             if (!existingTx.empty) {
+              console.log(`[PayoutAudit] Skipping Bet ${betId} - Transaction already exists.`);
               const currentBet = await t.get(betDoc.ref);
               if (currentBet.data()?.status === 'PENDING') {
                 t.update(betDoc.ref, { 
@@ -117,7 +143,7 @@ export class PayoutService {
                 user_id: userId,
                 draw_id: drawId,
                 type: 'payout',
-                amount: payoutAmount,
+                amount: payoutAmount,  
                 provider: 'System',
                 reference: idempotencyKey,
                 status: 'approved',
