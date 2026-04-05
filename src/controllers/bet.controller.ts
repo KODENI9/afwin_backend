@@ -3,6 +3,7 @@ import { db } from '../config/firebase';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { Bet, Transaction, Draw } from '../types';
 import { BetSchema } from '../types/schemas';
+import { updateUserXP } from '../services/level.service';
 
 // Helper to get or create a profile lazily (Supports Transactions)
 export const getProfile = async (userId: string, displayName?: string, referredByCode?: string, t?: FirebaseFirestore.Transaction, email?: string) => {
@@ -89,96 +90,92 @@ export const getProfile = async (userId: string, displayName?: string, referredB
 export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.auth?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
+ 
   const result = BetSchema.safeParse(req.body);
   if (!result.success) {
     return res.status(400).json({ error: result.error.issues[0]!.message });
   }
-
+ 
   const { draw_id, entries, request_id } = result.data;
   const newTotalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
-
+ 
   try {
     await db.runTransaction(async (t) => {
-      // 1. IDEMPOTENCY CHECK (Safety First)
+      // 1. IDEMPOTENCY CHECK
       const idRef = db.collection('idempotency_keys').doc(request_id);
       const idDoc = await t.get(idRef);
       if (idDoc.exists) {
         throw new Error('Cette requête a déjà été traitée. Double-clic détecté.');
       }
-
-      // 2. TRANSACTIONAL READS (Draw, Profile, Existing Bets)
+ 
+      // 2. TRANSACTIONAL READS
       const drawRef = db.collection('draws').doc(draw_id);
       const profileRef = db.collection('profiles').doc(userId);
       const existingBetsQuery = db.collection('bets')
         .where('user_id', '==', userId)
         .where('draw_id', '==', draw_id);
-
+ 
       const [drawDoc, profileDoc, existingBetsSnapshot] = await Promise.all([
         t.get(drawRef),
         t.get(profileRef),
         t.get(existingBetsQuery)
       ]);
-
-      // 3. STATS & DATA VALIDATION
+ 
+      // 3. VALIDATION
       if (!drawDoc.exists) throw new Error('Tirage non trouvé');
       const drawData = drawDoc.data() as Draw;
-      
-      // DOUBLE PROTECTION: Status + Time
+ 
       const now = new Date().getTime();
       const endTime = new Date(drawData.endTime).getTime();
-      
+ 
       if (drawData.status !== 'OPEN') throw new Error('Les mises sont fermées pour ce tirage.');
       if (now >= endTime) {
-        console.warn(`[BetRejection] User ${userId} attempted late bet for ${draw_id}. ServerNow: ${new Date(now).toISOString()}, EndTime: ${drawData.endTime}`);
+        console.warn(`[BetRejection] User ${userId} attempted late bet for ${draw_id}.`);
         throw new Error('Le délai de mise pour ce tirage est expiré.');
       }
-
+ 
       if (!profileDoc.exists) throw new Error('Profil utilisateur introuvable');
       const profileData = profileDoc.data();
       const currentBalance = profileData?.balance || 0;
-
+ 
       const existingBets = existingBetsSnapshot.docs.map(d => d.data() as Bet);
       const existingTotalAmount = existingBets.reduce((sum, b) => sum + b.amount, 0);
       const existingNumbers = new Set(existingBets.map(b => b.number));
-
+ 
       // 4. BUSINESS LOGIC CHECKS
       if (currentBalance < newTotalAmount) {
         throw new Error(`Solde insuffisant. Requis: ${newTotalAmount} CFA, Disponible: ${currentBalance} CFA.`);
       }
-
+ 
       const MAX_TOTAL_PER_DRAW = 50000;
       if (existingTotalAmount + newTotalAmount > MAX_TOTAL_PER_DRAW) {
         throw new Error(
           `Limite de mise par tirage atteinte (${MAX_TOTAL_PER_DRAW} CFA). Déjà misé: ${existingTotalAmount} CFA.`
         );
       }
-
+ 
       for (const entry of entries) {
         if (existingNumbers.has(entry.number)) {
           throw new Error(`Chiffre ${entry.number} déjà misé pour ce tirage.`);
         }
       }
-
-      // 5. ATOMIC WRITES (Starting here, no more reads!)
+ 
+      // 5. ATOMIC WRITES
       const FieldValue = require('firebase-admin').firestore.FieldValue;
-
-      // Deduct balance uniquely
+ 
       t.update(profileRef, {
         balance: FieldValue.increment(-newTotalAmount),
         updated_at: new Date().toISOString()
       });
-
-      // Update draw totals (Atomic increment for nested fields too)
+ 
       const drawUpdates: any = {
         totalPool: FieldValue.increment(newTotalAmount),
         updated_at: new Date().toISOString()
       };
-      
+ 
       for (const entry of entries) {
         drawUpdates[`totalsByNumber.${entry.number}`] = FieldValue.increment(entry.amount);
-        
-        // Create bet document
+ 
         const betRef = db.collection('bets').doc();
         t.set(betRef, {
           user_id: userId,
@@ -191,8 +188,7 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
         } as Bet);
       }
       t.update(drawRef, drawUpdates);
-
-      // Log transaction
+ 
       const txRef = db.collection('transactions').doc();
       t.set(txRef, {
         user_id: userId,
@@ -205,19 +201,49 @@ export const placeBet = async (req: AuthenticatedRequest, res: Response) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       } as Transaction);
-
-      // Register request_id (idempotency key)
-      t.set(idRef, { 
-        user_id: userId, 
-        created_at: new Date().toISOString() 
+ 
+      t.set(idRef, {
+        user_id: userId,
+        created_at: new Date().toISOString()
       });
     });
-
-    // Traceability log (Post-Transaction)
+ 
+    // ── POST-TRANSACTION : XP & NIVEAU ───────────────────────────────────
+    // Appelé hors transaction pour ne jamais bloquer le pari.
+    // Les erreurs XP sont silencieuses côté user.
+    const xpResult = await updateUserXP(userId, newTotalAmount);
+ 
+    if (xpResult?.leveledUp) {
+      // Envoyer une notification de montée de niveau
+      await db.collection('notifications').add({
+        user_id: userId,
+        title: `${xpResult.newGrade.emoji} Nouveau grade : ${xpResult.newGrade.label} !`,
+        message: `Félicitations ! Vous avez atteint le grade ${xpResult.newGrade.label} sur AF-WIN. Continuez comme ça !`,
+        type: 'win',
+        read: false,
+        created_at: new Date().toISOString()
+      });
+      console.log(`[XP] User ${userId} leveled up: ${xpResult.oldGrade.label} → ${xpResult.newGrade.label}`);
+    }
+    // ─────────────────────────────────────────────────────────────────────
+ 
+    // Audit log
     const { logAudit, AuditAction } = require('../services/audit.service');
     logAudit(AuditAction.BET_PLACED, { entries, request_id }, 'USER', userId, newTotalAmount, draw_id);
-
-    res.status(200).json({ success: true, message: 'Paris enregistrés avec succès.' });
+ 
+    res.status(200).json({
+      success: true,
+      message: 'Paris enregistrés avec succès.',
+      // Retourner les infos XP au frontend pour affichage immédiat
+      xp: xpResult ? {
+        gained: xpResult.newXP - (xpResult.newXP - (100 + Math.floor(newTotalAmount / 1000))),
+        total: xpResult.newXP,
+        grade: xpResult.newGrade.grade,
+        leveledUp: xpResult.leveledUp,
+        newGradeLabel: xpResult.leveledUp ? xpResult.newGrade.label : undefined,
+      } : null,
+    });
+ 
   } catch (error: any) {
     console.error('Error placing bet:', error);
     res.status(400).json({ error: error.message });
