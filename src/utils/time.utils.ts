@@ -24,8 +24,11 @@ export const getCurrentSlotId = (now: Date = new Date()): string | null => {
     const startHour = parseInt(slot.start.split(':')[0]!);
     const endHour = parseInt(slot.end.split(':')[0]!);
     
-    if (currentHour >= startHour && currentHour < endHour) {
-      return slot.id;
+    // FIX : gestion du croisement de minuit (ex: 20:00 → 00:00)
+    if (endHour === 0) {
+      if (currentHour >= startHour) return slot.id;
+    } else {
+      if (currentHour >= startHour && currentHour < endHour) return slot.id;
     }
   }
   return null;
