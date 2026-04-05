@@ -1,10 +1,8 @@
 import { db } from '../config/firebase';
-import * as admin from 'firebase-admin'; // Correct import for FieldValue
 
 export class AnalyticsService {
   /**
    * Updates daily stats when a draw is resolved.
-   * Calculations:
    * profit = totalPool - totalPayout - referralBonus
    */
   static async updateDailyStats(date: string, data: { 
