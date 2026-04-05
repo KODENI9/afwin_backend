@@ -587,17 +587,17 @@ export const createGlobalNotification = async (req: AuthenticatedRequest, res: R
       }
     }
 
-    const newNotif: Omit<GlobalNotification, 'id'> = {
+   const newNotif: Omit<GlobalNotification, 'id'> = {
       title,
       message,
       type: type || 'info',
       target: target || 'all',
-      targetUserId: user_id || undefined,
+      // Ne pas inclure targetUserId si pas de user_id
+      ...(user_id ? { targetUserId: user_id } : {}),
       status: isSuperAdmin ? 'APPROVED' : 'PENDING',
       createdBy: adminId,
       createdAt: new Date().toISOString()
     };
-    
     if (isSuperAdmin) {
       newNotif.validatedBy = adminId;
       newNotif.validatedAt = new Date().toISOString();
