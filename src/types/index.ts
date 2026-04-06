@@ -17,15 +17,16 @@ export enum AdminPermission {
   MANAGE_SETTINGS = 'MANAGE_SETTINGS',
   MANAGE_NETWORKS = 'MANAGE_NETWORKS',
   VIEW_DRAWS = 'VIEW_DRAWS',
-  VIEW_BASIC_STATS = 'VIEW_BASIC_STATS'
+  VIEW_BASIC_STATS = 'VIEW_BASIC_STATS',
+  MANAGE_FLASH = 'MANAGE_FLASH', // ← nouveau
 }
 
 export interface UserProfile {
   id?: string;
-  user_id: string; // Clerk user ID
+  user_id: string;
   display_name: string;
   balance: number;
-  role: UserRole | string; // Support legacy strings during migration
+  role: UserRole | string;
   permissions?: AdminPermission[] | string[];
   referral_code: string;
   referred_by?: string;
@@ -40,17 +41,17 @@ export interface UserProfile {
 
 export interface Draw {
   id?: string;
-  draw_date: string; // YYYY-MM-DD (legacy/grouping)
-  slotId: string; // S1, S2, etc.
-  startTime: string; // ISO string
-  endTime: string; // ISO string
+  draw_date: string;
+  slotId: string;
+  startTime: string;
+  endTime: string;
   status: 'OPEN' | 'CLOSED' | 'RESOLVED';
   totalPool: number;
-  multiplier: number; // e.g. 5
-  commissionRate?: number; // e.g. 0.10
+  multiplier: number;
+  commissionRate?: number;
   winningNumber?: number;
-  snapshotTotals?: Record<number, number>; // {1: 1000, 2: 500, ...}
-  snapshotHash?: string; // SHA256 of snapshotTotals
+  snapshotTotals?: Record<number, number>;
+  snapshotHash?: string;
   closedAt?: string;
   resolvedAt?: string;
   payoutStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED';
@@ -62,6 +63,55 @@ export interface Draw {
   realMultiplier?: number;
   created_at: string;
   updated_at?: string;
+}
+
+/**
+ * Flash Draw — mini-tirage de durée courte lancé manuellement ou automatiquement.
+ * Stocké dans la collection `flash_draws`.
+ */
+export interface FlashDraw {
+  id?: string;
+  type: 'flash';                          // discriminant pour le frontend
+  label: string;                          // ex: "⚡ Flash 18h30"
+  durationMinutes: number;               // durée en minutes (ex: 5)
+  startTime: string;                     // ISO — quand le Flash commence
+  endTime: string;                       // ISO — calculé: startTime + durationMinutes
+  status: 'OPEN' | 'CLOSED' | 'RESOLVED';
+  multiplier: number;                    // défini par l'admin à la création
+  realMultiplier?: number;
+  totalPool: number;
+  winningNumber?: number;
+  snapshotTotals?: Record<number, number>;
+  snapshotHash?: string;
+  closedAt?: string;
+  resolvedAt?: string;
+  payoutStatus?: 'PENDING' | 'PROCESSING' | 'COMPLETED';
+  totalPayout?: number;
+  profit?: number;
+  locked?: boolean;
+  createdBy: string;                     // adminId ou 'system'
+  createdAt: string;
+  updated_at?: string;
+  // Plages horaires auto (si créé par le scheduler)
+  autoSchedule?: boolean;
+}
+
+/**
+ * Configuration des plages horaires Flash (stockée dans settings/flash_config).
+ */
+export interface FlashScheduleConfig {
+  enabled: boolean;
+  slots: FlashTimeSlot[];
+}
+
+export interface FlashTimeSlot {
+  id: string;              // ex: "FS1"
+  startHour: number;      // ex: 9  (09:00)
+  startMinute: number;    // ex: 30 (09:30)
+  durationMinutes: number; // ex: 5
+  multiplier: number;     // ex: 8
+  label: string;          // ex: "Flash Matinal"
+  enabled: boolean;
 }
 
 export interface Bet {
@@ -81,7 +131,7 @@ export interface Bet {
 export interface Transaction {
   id?: string;
   user_id: string;
-  draw_id?: string; // Associated draw for payouts/bets
+  draw_id?: string;
   type: 'deposit' | 'withdrawal' | 'bet' | 'payout' | 'commission' | 'referral_bonus' | 'transfer_sent' | 'transfer_received';
   amount: number;
   provider: string;
@@ -111,8 +161,8 @@ export interface GlobalNotification {
   target?: 'all' | 'user';
   targetUserId?: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
-  createdBy: string; // adminId
-  validatedBy?: string; // superAdminId
+  createdBy: string;
+  validatedBy?: string;
   rejectionReason?: string;
   createdAt: string;
   validatedAt?: string;
