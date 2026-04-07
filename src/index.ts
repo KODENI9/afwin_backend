@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
 import drawRoutes from './routes/draw.routes';
+import flashRoutes from './routes/flash.routes';
 import betRoutes from './routes/bet.routes';
 import walletRoutes from './routes/wallet.routes';
 import adminRoutes from './routes/admin.routes';
@@ -105,9 +106,9 @@ app.get('/api/ping', (req, res) => {
 // ── Maintenance mode (applies to protected API routes only) ───────────────
 app.use('/api/bets', maintenanceMiddleware);
 app.use('/api/wallet', maintenanceMiddleware);
-
 // ── Routes ────────────────────────────────────────────────────────────────
 app.use('/api/draws', drawRoutes);
+app.use('/api/flash', flashRoutes);
 app.use('/api/bets', betLimiter, betRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/admin', adminRoutes);

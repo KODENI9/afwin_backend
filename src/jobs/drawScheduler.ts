@@ -110,7 +110,7 @@ export const runFlashCycle = async (): Promise<void> => {
       .get();
     for (const doc of resolvedFlashes.docs) {
       console.log(`[Flash] Paying ${doc.id}...`);
-      await PayoutService.distributePayouts(doc.id).catch(err =>
+      await PayoutService.distributePayouts(doc.id, 'flash_draws').catch(err =>
         console.error(`[Flash] Failed to payout ${doc.id}:`, err)
       );
     }

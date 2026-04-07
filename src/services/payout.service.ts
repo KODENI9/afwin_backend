@@ -13,11 +13,11 @@ export class PayoutService {
    * 3. [BUG FIX] Toutes les lectures AVANT toutes les écritures dans la transaction
    *    → Firestore interdit un t.get() après un t.update() dans la même transaction
    */
-  static async distributePayouts(drawId: string): Promise<void> {
-    const drawRef = db.collection('draws').doc(drawId);
+  static async distributePayouts(drawId: string, collection: string = 'draws'): Promise<void> {
+    const drawRef = db.collection(collection).doc(drawId);
     const drawDoc = await drawRef.get();
 
-    if (!drawDoc.exists) throw new Error('Draw not found');
+    if (!drawDoc.exists) throw new Error(`Draw not found in collection '${collection}'`);
     const drawData = drawDoc.data() as Draw;
 
     if (drawData.status !== 'RESOLVED' && drawData.status !== 'CLOSED') {

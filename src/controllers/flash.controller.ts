@@ -8,6 +8,8 @@ import { logAudit, AuditAction } from '../services/audit.service';
 /**
  * ── ADMIN : Créer un Flash manuellement ──────────────────────────────────────
  * POST /api/admin/flash/create
+ * Request failed with status code 404
+ 
  */
 export const createFlash = async (req: AuthenticatedRequest, res: Response) => {
   const adminId = req.auth?.userId;
