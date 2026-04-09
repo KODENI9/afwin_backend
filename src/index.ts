@@ -16,6 +16,8 @@ import notificationRoutes from './routes/notification.routes';
 import { maintenanceMiddleware } from './middleware/maintenance';
 import { startDrawScheduler } from './jobs/drawScheduler';
 
+import chatRoutes from './routes/chat.route';
+
 // No changes needed here, just removing the old call
 
 const app = express();
@@ -114,7 +116,7 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/profiles', profileRoutes);
 app.use('/api/notifications', notificationRoutes);
-
+app.use('/api/chat', chatRoutes);
 // ── Global Error Handler (CATCH-ALL) ──────────────────────────────────────
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error(`[ERROR] ${new Date().toISOString()} ${req.method} ${req.url}:`, err.stack || err.message || err);
