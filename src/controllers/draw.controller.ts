@@ -31,6 +31,26 @@ export const getCurrentDraw = async (req: AuthenticatedRequest, res: Response) =
   }
 };
 
+// Public version (no auth required)
+export const getActiveDraw = async (_req: any, res: Response) => {
+  try {
+    const nowIso = new Date().toISOString();
+    const snapshot = await db.collection('draws')
+      .where('status', '==', 'OPEN')
+      .get();
+    
+    const currentDraw = snapshot.docs.find(doc => {
+      const data = doc.data() as Draw;
+      return nowIso >= data.startTime && nowIso < data.endTime;
+    });
+    
+    if (!currentDraw) return res.status(200).json(null);
+    res.status(200).json({ id: currentDraw.id, ...currentDraw.data() });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch active draw' });
+  }
+};
+
 export const getDrawHistory = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const drawsRef = db.collection('draws');

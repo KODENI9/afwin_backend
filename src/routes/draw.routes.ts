@@ -1,14 +1,15 @@
 import { Router } from 'express';
-import type { RequestHandler } from 'express';
-import { getCurrentDraw, getDrawHistory } from '../controllers/draw.controller';
+import { getActiveDraw, getCurrentDraw, getDrawHistory } from '../controllers/draw.controller';
 import { getSettings } from '../controllers/admin.controller';
 import { requireAuth } from '../middleware/auth';
 
 const router = Router();
-
 const auth = requireAuth as any;
 
-// Retrieve the current day's draw (or create if missing)
+// Retrieve the active draw publicly (no auth)
+router.get('/active', getActiveDraw);
+
+// Retrieve the current day's draw (requires auth)
 router.get('/current', auth, getCurrentDraw);
 
 // Retrieve past draws
